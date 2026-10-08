@@ -342,15 +342,6 @@ false
 </td>
 			<td>Actions to take if the validation fails. Possible values are: Deny, Warn, Audit.</td>
 		</tr>
-		<tr>
-			<td>policies.system-workloads</td>
-			<td>object</td>
-			<td><pre lang="">
-"{}"
-</pre>
-</td>
-			<td>Check that system workloads in customer namespaces have the correct fields</td>
-		</tr>
 	</tbody>
 </table>
 <h3>Labels (Org)</h3>
@@ -645,6 +636,15 @@ false
 	</thead>
 	<tbody>
 		<tr>
+			<td>policies.system-workloads</td>
+			<td>object</td>
+			<td><pre lang="">
+"{}"
+</pre>
+</td>
+			<td>Check that system workloads in customer namespaces have the correct fields</td>
+		</tr>
+		<tr>
 			<td>policies.system-workloads.debug</td>
 			<td>bool</td>
 			<td><pre lang="json">
@@ -657,7 +657,7 @@ false
 			<td>policies.system-workloads.matchConditions</td>
 			<td>string</td>
 			<td><pre lang="json">
-"[spxid, systemWorkloads]"
+"[spxid, systemWorkloads, notNabok]"
 </pre>
 </td>
 			<td>Match conditions to target only specific resources. Possible values are: "spxid" (either orgID, projectID, resEffID, namespace, or name is an SPXID), "notGenerated" (doesn't have a "generated" label), "notSourcedVolSnap" (volume snapshot without labels starting with "snapshot.kubevirt.io/source-vm"), "notCsiDriver" (volume snapshot without a "csi-driver/cluster" label), "notTmpSnapshot" (volume snapshot without a name starting with "tmp-snapshot-*"), "virtLauncher" (pod whose name starts with "virt-launcher"), "systemWorkloads" (pod with certain "superphenix.net/workloadClass" label values), ”notNabok” (has label “plan-name” that starts with “migration”). If multiple conditions are provided, ALL must be true for a policy to be evaluated. If ANY is false, there is no match.</td>

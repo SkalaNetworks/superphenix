@@ -34,9 +34,7 @@ var ignoreDifferences = v1alpha1.IgnoreDifferences{
 			"/metadata/labels/app.kubernetes.io~1version",
 			"/metadata/labels/helm.sh~1chart",
 			"/metadata/labels/superphenix.net~1gitops",
-			"/spec/template/metadata/labels/app.kubernetes.io~1version",
-			"/spec/template/metadata/labels/helm.sh~1chart",
-			"/spec/template/metadata/labels/superphenix.net~1gitops",
+			"/spec",
 		},
 	},
 	v1alpha1.ResourceIgnoreDifferences{

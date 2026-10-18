@@ -38,7 +38,9 @@ func Module(s API) router.Module {
 	var (
 		jwtOrToken            = authentication.Authenticate(jwt.JwtBearerAuth, apiToken.ApiTokenAuth)
 		orgaRead              = permify.CheckPermission(pwPerm.OrganizationRead)
+		orgaProjectQuotaRead  = permify.CheckPermission(pwPerm.OrganizationProjectQuotaRead)
 		orgaProjectQuotaWrite = permify.CheckPermission(pwPerm.OrganizationProjectQuotaWrite)
+		projectAZQuotaRead    = permify.CheckPermission(pwPerm.ProjectAZQuotaRead)
 		projectAZQuotaWrite   = permify.CheckPermission(pwPerm.ProjectAZQuotaWrite)
 	)
 
@@ -46,8 +48,8 @@ func Module(s API) router.Module {
 		Name:  ModuleName,
 		Mount: "/v1",
 		Routes: []router.Route{
-			router.Get("/organization/{orgaId}/quota", s.GetOrganizationQuota, jwtOrToken, orgaRead),
-			router.Get("/organization/{orgaId}/project/{projectId}/quota", s.GetProjectQuota, jwtOrToken, orgaRead),
+			router.Get("/organization/{orgaId}/quota", s.GetOrganizationQuota, jwtOrToken, orgaRead, orgaProjectQuotaRead),
+			router.Get("/organization/{orgaId}/project/{projectId}/quota", s.GetProjectQuota, jwtOrToken, orgaRead, projectAZQuotaRead),
 			router.Put("/organization/{orgaId}/project/{projectId}/quota", s.SetProjectQuota, jwtOrToken, orgaRead, orgaProjectQuotaWrite).
 				Audited(auditResource, router.ActionUpdate, "projectId"),
 			router.Put("/organization/{orgaId}/project/{projectId}/quota/az/{codeAZ}", s.SetProjectAZQuota, jwtOrToken, orgaRead, projectAZQuotaWrite).

@@ -140,6 +140,7 @@ var (
 	DefaultOrganizationDeveloper = []string{
 		permissionSet.SpxMember,
 		permissionSet.ProjectManagement,
+		permissionSet.ProjectQuotaReadOnly,
 	}
 	DefaultProjectDeveloper = []string{
 		permissionSet.ProjectInstanceFullAccess,
@@ -154,6 +155,7 @@ var (
 		permissionSet.ProjectKaaSFullAccess,
 		permissionSet.ProjectBaaSFullAccess,
 		permissionSet.ProjectBucketFullAccess,
+		permissionSet.ProjectAZQuotaReadOnly,
 		permissionSet.ProjectArgoCdAccess,
 	}
 )

@@ -20,6 +20,7 @@ const (
 	AuditLogReadOnly       = "AuditLogReadOnly"
 	ProjectManagement      = "ProjectManagement"
 	ProjectQuotaFullAccess = "ProjectQuotaFullAccess"
+	ProjectQuotaReadOnly   = "ProjectQuotaReadOnly"
 	SettingsEdition        = "SettingsEdition"
 
 	ProjectInstanceFullAccess     = "ProjectInstanceFullAccess"
@@ -59,6 +60,7 @@ const (
 	ProjectBucketReadOnly          = "ProjectBucketReadOnly"
 
 	ProjectAZQuotaFullAccess = "ProjectAZQuotaFullAccess"
+	ProjectAZQuotaReadOnly   = "ProjectAZQuotaReadOnly"
 
 	ProjectArgoCdAccess = "ProjectArgoCdAccess"
 )
@@ -76,6 +78,7 @@ var PermissionSetsEntityMap = map[string]string{
 	AuditLogReadOnly:       entity.Organization,
 	ProjectManagement:      entity.Organization,
 	ProjectQuotaFullAccess: entity.Organization,
+	ProjectQuotaReadOnly:   entity.Organization,
 
 	ProjectInstanceFullAccess:     entity.Project,
 	ProjectInstanceTerminalAccess: entity.Project,
@@ -117,6 +120,7 @@ var PermissionSetsEntityMap = map[string]string{
 	ProjectBucketReadOnly:          entity.Project,
 
 	ProjectAZQuotaFullAccess: entity.Project,
+	ProjectAZQuotaReadOnly:   entity.Project,
 
 	ProjectArgoCdAccess: entity.Project,
 }

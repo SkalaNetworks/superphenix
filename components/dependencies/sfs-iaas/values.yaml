@@ -45,8 +45,6 @@ deviceMapping: {}
 bgpSpeaker: ""
 
 # -- Optional ResourceQuota of the project namespace: every entry is rendered as is in `spec.hard`.
-# No ResourceQuota is rendered when empty. The quotas managed through the Superphenix API are
-# enforced by the superphenix-controller of each AZ (ResourceQuota `spx-quota`), independently of this chart.
 # @section -- Quotas
 quota: {}
   # requests.cpu: "16"

@@ -2,9 +2,9 @@
 // stores and validates quotas, then translates them into the Kubernetes
 // ResourceQuota `spec.hard` entries sent to the controller of each AZ.
 //
-// A quota is a flat map of resource name to quantity. Three abstract resources
-// are translated into several Kubernetes quota keys; every other key is passed
-// through to Kubernetes untouched (e.g. "pods", "count/virtualmachines.kubevirt.io").
+// A quota is a flat map of resource name to quantity. Only the abstract
+// resources cpu, memory and storage are allowed for now; each one is translated
+// into one or several Kubernetes quota keys.
 //
 // Semantics: a resource absent from the map is not limited by this level, a
 // resource present with "0" is limited to zero.
@@ -18,39 +18,24 @@ import (
 	"strings"
 
 	"k8s.io/apimachinery/pkg/api/resource"
-	"k8s.io/apimachinery/pkg/util/validation"
 )
 
 // Abstract resources, translated by ToKubernetesQuota.
 const (
-	CPU    = "cpu"
-	Memory = "memory"
-	Disk   = "disk"
+	CPU     = "cpu"
+	Memory  = "memory"
+	Storage = "storage"
 )
-
-// MaxResources bounds the number of resources of a single quota.
-const MaxResources = 64
 
 var ErrInvalidResources = errors.New("invalid quota resources")
 
-// translations maps each abstract resource to the Kubernetes quota keys it produces.
+// translations maps each allowed abstract resource to the Kubernetes quota keys it produces.
+// A resource missing from this map is rejected.
 var translations = map[string][]string{
-	CPU:    {"requests.cpu", "limits.cpu"},
-	Memory: {"requests.memory", "limits.memory"},
-	Disk:   {"requests.storage"},
+	CPU:     {"requests.cpu", "limits.cpu"},
+	Memory:  {"requests.memory", "limits.memory"},
+	Storage: {"requests.storage"},
 }
-
-// reserved holds the Kubernetes keys produced by a translation. They cannot be
-// set directly, otherwise they would silently conflict with the abstract resource.
-var reserved = func() map[string]struct{} {
-	m := map[string]struct{}{}
-	for _, keys := range translations {
-		for _, k := range keys {
-			m[k] = struct{}{}
-		}
-	}
-	return m
-}()
 
 // Resources is the abstract quota of an organization, a project or a project AZ.
 type Resources map[string]string
@@ -61,9 +46,6 @@ type Quantities map[string]int64
 
 // Parse validates and converts Resources into Quantities.
 func (r Resources) Parse() (Quantities, error) {
-	if len(r) > MaxResources {
-		return nil, fmt.Errorf("%w: at most %d resources are allowed", ErrInvalidResources, MaxResources)
-	}
 	q := make(Quantities, len(r))
 	for name, value := range r {
 		if err := validateName(name); err != nil {
@@ -79,25 +61,19 @@ func (r Resources) Parse() (Quantities, error) {
 }
 
 func validateName(name string) error {
-	if _, ok := reserved[name]; ok {
-		return fmt.Errorf("%w: %q is managed by the %q resource and cannot be set directly", ErrInvalidResources, name, abstractOf(name))
-	}
-	if _, ok := translations[name]; ok {
-		return nil
-	}
-	if errs := validation.IsQualifiedName(name); len(errs) > 0 {
-		return fmt.Errorf("%w: invalid resource name %q: %s", ErrInvalidResources, name, strings.Join(errs, "; "))
+	if _, ok := translations[name]; !ok {
+		return fmt.Errorf("%w: unsupported resource %q, allowed resources are: %s", ErrInvalidResources, name, strings.Join(allowedNames(), ", "))
 	}
 	return nil
 }
 
-func abstractOf(k8sKey string) string {
-	for abstract, keys := range translations {
-		if slices.Contains(keys, k8sKey) {
-			return abstract
-		}
+func allowedNames() []string {
+	names := make([]string, 0, len(translations))
+	for name := range translations {
+		names = append(names, name)
 	}
-	return ""
+	slices.Sort(names)
+	return names
 }
 
 func parseQuantity(name, value string) (int64, error) {
@@ -126,13 +102,9 @@ func parseQuantity(name, value string) (int64, error) {
 func (r Resources) ToKubernetesQuota() map[string]string {
 	hard := make(map[string]string, len(r))
 	for name, value := range r {
-		if keys, ok := translations[name]; ok {
-			for _, k := range keys {
-				hard[k] = value
-			}
-			continue
+		for _, k := range translations[name] {
+			hard[k] = value
 		}
-		hard[name] = value
 	}
 	return hard
 }
@@ -148,10 +120,8 @@ func (q Quantities) Resources() Resources {
 			} else {
 				r[name] = fmt.Sprintf("%dm", v)
 			}
-		case Memory, Disk:
-			r[name] = resource.NewQuantity(v, resource.BinarySI).String()
 		default:
-			r[name] = fmt.Sprintf("%d", v)
+			r[name] = resource.NewQuantity(v, resource.BinarySI).String()
 		}
 	}
 	return r
@@ -204,17 +174,6 @@ func (q Quantities) Exceeds(limit Quantities) (string, bool) {
 	return "", false
 }
 
-// NotIn returns the resources of q that are absent from other, sorted.
-func (q Quantities) NotIn(other Quantities) []string {
-	var names []string
-	for _, name := range sortedNames(q) {
-		if _, ok := other[name]; !ok {
-			names = append(names, name)
-		}
-	}
-	return names
-}
-
 func (q Quantities) format(name string) string {
 	return Quantities{name: q[name]}.Resources()[name]
 }
@@ -238,23 +197,21 @@ func saturatingAdd(a, b int64) int64 {
 // EffectiveAZQuota computes the resources to enforce in one AZ of a project,
 // given the quota of each level (nil when the level has no quota).
 //
-// It fails closed: when an ancestor (organization or project) limits a
-// resource, that resource is always enforced in the AZ, at 0 when the AZ has
-// no allocation for it (e.g. a project created, or an AZ added, after the
-// quotas were distributed). Resources no ancestor limits are ignored, so
-// tenants cannot override platform defaults on resources they were not given.
-// Without any ancestor quota, nothing is enforced (an AZ quota cannot exist
-// without a project quota).
+// The AZ quota is enforced as is, even without any ancestor quota, and even
+// when it exceeds an ancestor (overcommitment is tolerated, see the crud
+// layer: overcommitted quotas can only be lowered). It fails closed: when an
+// ancestor (organization or project) limits a resource the AZ has no
+// allocation for (e.g. a project created, or an AZ added, after the quotas
+// were distributed), that resource is enforced at 0 in the AZ.
 func EffectiveAZQuota(org, project, az Resources) Resources {
-	res := make(Resources, len(org)+len(project))
+	res := make(Resources, len(org)+len(project)+len(az))
 	for _, parent := range []Resources{org, project} {
 		for name := range parent {
-			if v, ok := az[name]; ok {
-				res[name] = v
-			} else {
-				res[name] = "0"
-			}
+			res[name] = "0"
 		}
+	}
+	for name, v := range az {
+		res[name] = v
 	}
 	return res
 }

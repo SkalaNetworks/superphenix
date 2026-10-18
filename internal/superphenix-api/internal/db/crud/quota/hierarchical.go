@@ -27,7 +27,6 @@ var (
 	ErrOrganizationNotFound = errors.New("organization not found")
 	ErrProjectNotFound      = errors.New("project not found")
 	ErrAZNotFound           = errors.New("availability zone not found")
-	ErrProjectQuotaRequired = errors.New("the project has no quota: AZ quotas can only split a project quota")
 	ErrProjectQuotaEnforced = errors.New("the project quota cannot be removed while the organization has a quota")
 )
 
@@ -161,7 +160,8 @@ func GetProjectQuota(ctx context.Context, projectId uuid.UUID) (*model.ProjectQu
 //
 // When no project quota exists yet, the organization quota is split equally among the
 // projects of the organization, and each project quota among the AZs of the organization.
-// Otherwise the existing project quotas must fit in the new organization quota.
+// Otherwise the existing project quotas are kept, even if they exceed the new organization
+// quota: the projects are then overcommitted and can only lower their quotas.
 func SetOrganizationQuota(ctx context.Context, orgId uuid.UUID, resources model.QuotaResources) (*model.OrganizationQuota, error) {
 	parsedOrg, err := resources.Parse()
 	if err != nil {
@@ -179,15 +179,7 @@ func SetOrganizationQuota(ctx context.Context, orgId uuid.UUID, resources model.
 			return err
 		}
 
-		if len(pqs) > 0 {
-			allocated, err := sumProjectQuotas(pqs)
-			if err != nil {
-				return err
-			}
-			if msg, exceeded := allocated.Exceeds(parsedOrg); exceeded {
-				return fmt.Errorf("%w: existing project quotas: %s", ErrOrgQuotaExceeded, msg)
-			}
-		} else {
+		if len(pqs) == 0 {
 			var projects []model.Project
 			if err := tx.Where("orga_id = ?", orgId).Order("id").Find(&projects).Error; err != nil {
 				return err
@@ -211,8 +203,9 @@ func SetOrganizationQuota(ctx context.Context, orgId uuid.UUID, resources model.
 // SetProjectQuota sets the quota of a project of the organization, and splits it equally
 // among the AZs of the organization (overwriting the previous AZ quotas).
 //
-// When the organization has a quota, the project can only limit resources limited by the
-// organization, and the sum of the project quotas must fit in the organization quota.
+// The project quota can be set whether or not the organization has a quota. When it has
+// one, the sum of the project quotas must fit in it, except for the resources that are
+// not increased (see checkCapacity).
 func SetProjectQuota(ctx context.Context, orgId, projectId uuid.UUID, resources model.QuotaResources) (*model.ProjectQuota, error) {
 	parsedProj, err := resources.Parse()
 	if err != nil {
@@ -241,12 +234,22 @@ func SetProjectQuota(ctx context.Context, orgId, projectId uuid.UUID, resources 
 			if err != nil {
 				return err
 			}
-			others := slices.DeleteFunc(pqs, func(pq model.ProjectQuota) bool { return pq.ProjectId == projectId })
+			current := spxQuota.Quantities{}
+			others := slices.DeleteFunc(pqs, func(pq model.ProjectQuota) bool {
+				if pq.ProjectId != projectId {
+					return false
+				}
+				current, err = pq.Resources.Parse()
+				return true
+			})
+			if err != nil {
+				return err
+			}
 			allocated, err := sumProjectQuotas(others)
 			if err != nil {
 				return err
 			}
-			if err := checkWithin(parsedProj, allocated, parsedOrg, ErrOrgQuotaExceeded, "organization"); err != nil {
+			if err := checkCapacity(parsedProj, current, allocated, parsedOrg, ErrOrgQuotaExceeded); err != nil {
 				return err
 			}
 		}
@@ -260,9 +263,9 @@ func SetProjectQuota(ctx context.Context, orgId, projectId uuid.UUID, resources 
 	return &saved, nil
 }
 
-// SetProjectAZQuota sets the quota of a project in one AZ. The project must have a quota:
-// the AZ can only limit resources limited by the project, and the sum of the AZ quotas
-// must fit in the project quota.
+// SetProjectAZQuota sets the quota of a project in one AZ, whether or not the project has a
+// quota. The sum of the AZ quotas must fit in the project limit (see projectLimit), except for
+// the resources that are not increased (see checkCapacity).
 func SetProjectAZQuota(ctx context.Context, orgId, projectId uuid.UUID, codeAZ string, resources model.QuotaResources) (*model.ProjectAZQuota, error) {
 	parsedAZ, err := resources.Parse()
 	if err != nil {
@@ -281,32 +284,30 @@ func SetProjectAZQuota(ctx context.Context, orgId, projectId uuid.UUID, codeAZ s
 			return err
 		}
 
-		pq, err := findProjectQuota(tx, projectId)
+		limit, err := projectLimit(tx, orgId, projectId)
 		if err != nil {
 			return err
 		}
-		if pq == nil {
-			return ErrProjectQuotaRequired
-		}
-		parsedProj, err := pq.Resources.Parse()
-		if err != nil {
-			return err
-		}
-
-		var others []model.ProjectAZQuota
-		if err := tx.Where("project_id = ? AND code_az <> ?", projectId, codeAZ).Find(&others).Error; err != nil {
-			return err
-		}
-		allocated := spxQuota.Quantities{}
-		for _, azq := range others {
-			parsed, err := azq.Resources.Parse()
-			if err != nil {
+		if limit != nil {
+			var azqs []model.ProjectAZQuota
+			if err := tx.Where("project_id = ?", projectId).Find(&azqs).Error; err != nil {
 				return err
 			}
-			allocated = allocated.Add(parsed)
-		}
-		if err := checkWithin(parsedAZ, allocated, parsedProj, ErrProjectQuotaExceeded, "project"); err != nil {
-			return err
+			current, allocated := spxQuota.Quantities{}, spxQuota.Quantities{}
+			for _, azq := range azqs {
+				parsed, err := azq.Resources.Parse()
+				if err != nil {
+					return err
+				}
+				if azq.CodeAZ == codeAZ {
+					current = parsed
+				} else {
+					allocated = allocated.Add(parsed)
+				}
+			}
+			if err := checkCapacity(parsedAZ, current, allocated, limit, ErrProjectQuotaExceeded); err != nil {
+				return err
+			}
 		}
 
 		return upsert(tx, &saved, []string{"project_id", "code_az"}, "resources")
@@ -315,6 +316,30 @@ func SetProjectAZQuota(ctx context.Context, orgId, projectId uuid.UUID, codeAZ s
 		return nil, err
 	}
 	return &saved, nil
+}
+
+// projectLimit returns the limit the AZ quotas of a project must fit in, or nil when nothing
+// limits them: the project quota when defined, otherwise, when the organization has a quota,
+// 0 for every resource the organization limits (a project without quota in a limited
+// organization gets nothing, like in EffectiveAZQuota, so its AZ quotas cannot escape the
+// organization quota on those resources).
+func projectLimit(tx *gorm.DB, orgId, projectId uuid.UUID) (spxQuota.Quantities, error) {
+	pq, err := findProjectQuota(tx, projectId)
+	if err != nil {
+		return nil, err
+	}
+	if pq != nil {
+		return pq.Resources.Parse()
+	}
+	oq, err := findOrganizationQuota(tx, orgId)
+	if err != nil || oq == nil {
+		return nil, err
+	}
+	limit := spxQuota.Quantities{}
+	for name := range oq.Resources {
+		limit[name] = 0
+	}
+	return limit, nil
 }
 
 // DeleteOrganizationQuota removes an organization quota (platform administrators only).
@@ -347,13 +372,21 @@ func DeleteProjectQuota(ctx context.Context, orgId, projectId uuid.UUID) error {
 	})
 }
 
-// checkWithin checks that requested only limits resources of limit, and that
-// allocated + requested fits in limit.
-func checkWithin(requested, allocated, limit spxQuota.Quantities, errExceeded error, level string) error {
-	if names := requested.NotIn(limit); len(names) > 0 {
-		return fmt.Errorf("%w: %s not limited by the %s quota", errExceeded, strings.Join(names, ", "), level)
+// checkCapacity checks that a child quota (requested, replacing current) fits in the parent
+// limit, allocated being the sum of the other children. Resources the parent does not limit
+// are free.
+//
+// Overcommitment is tolerated: the children may exceed the parent (e.g. when the parent
+// quota is set or lowered after them). A resource that would exceed the limit is then only
+// refused if it is increased, so the children cannot grow further and can only be lowered.
+func checkCapacity(requested, current, allocated, limit spxQuota.Quantities, errExceeded error) error {
+	increased := spxQuota.Quantities{}
+	for name, v := range requested {
+		if v > current[name] {
+			increased[name] = v
+		}
 	}
-	if msg, exceeded := allocated.Add(requested).Exceeds(limit); exceeded {
+	if msg, exceeded := allocated.Add(increased).Exceeds(limit); exceeded {
 		return fmt.Errorf("%w: %s", errExceeded, msg)
 	}
 	return nil

@@ -120,7 +120,7 @@ func expectDeleteAndSync(mock sqlmock.Sqlmock, orgID, projectID uuid.UUID) {
 		WillReturnRows(sqlmock.NewRows([]string{"id"}).AddRow(projectID))
 	mock.ExpectQuery(regexp.QuoteMeta(`SELECT * FROM "organization_quotas"`)).WillReturnRows(sqlmock.NewRows([]string{"organization_id"}))
 	mock.ExpectQuery(regexp.QuoteMeta(`SELECT * FROM "project_quotas"`)).
-		WillReturnRows(sqlmock.NewRows([]string{"project_id", "organization_id", "resources"}).AddRow(projectID, orgID, `{"cpu":"4","pods":"10"}`))
+		WillReturnRows(sqlmock.NewRows([]string{"project_id", "organization_id", "resources"}).AddRow(projectID, orgID, `{"cpu":"4","storage":"10Gi"}`))
 	mock.ExpectQuery(regexp.QuoteMeta(`SELECT * FROM "project_az_quotas"`)).
 		WillReturnRows(sqlmock.NewRows([]string{"project_id", "code_az", "resources"}).AddRow(projectID, "az1", `{"cpu":"2"}`))
 }
@@ -135,8 +135,8 @@ func TestAdminDeleteOrganizationQuota(t *testing.T) {
 		rr := httptest.NewRecorder()
 		newRouter().ServeHTTP(rr, httptest.NewRequest(http.MethodDelete, "/organization/"+orgID.String(), nil))
 		assert.Equal(t, http.StatusNoContent, rr.Code)
-		// The project still limits pods, without AZ share: enforced at 0.
-		assert.Equal(t, map[string]string{"requests.cpu": "2", "limits.cpu": "2", "pods": "0"},
+		// The project still limits storage, without AZ share: enforced at 0.
+		assert.Equal(t, map[string]string{"requests.cpu": "2", "limits.cpu": "2", "requests.storage": "0"},
 			pushed["PUT /"+orgID.String()+"/"+projectID.String()+"/quota"])
 	})
 

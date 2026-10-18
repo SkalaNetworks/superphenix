@@ -120,7 +120,6 @@ func TestWriteError(t *testing.T) {
 		crudQuota.ErrOrganizationNotFound:                        http.StatusNotFound,
 		crudQuota.ErrProjectNotFound:                             http.StatusNotFound,
 		crudQuota.ErrAZNotFound:                                  http.StatusNotFound,
-		crudQuota.ErrProjectQuotaRequired:                        http.StatusConflict,
 		crudQuota.ErrProjectQuotaEnforced:                        http.StatusConflict,
 	}
 	for err, status := range tests {

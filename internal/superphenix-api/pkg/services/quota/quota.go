@@ -160,8 +160,7 @@ func WriteError(w http.ResponseWriter, r *http.Request, err error, msg string) {
 		errors.Is(err, crudQuota.ErrProjectNotFound),
 		errors.Is(err, crudQuota.ErrAZNotFound):
 		status = http.StatusNotFound
-	case errors.Is(err, crudQuota.ErrProjectQuotaRequired),
-		errors.Is(err, crudQuota.ErrProjectQuotaEnforced):
+	case errors.Is(err, crudQuota.ErrProjectQuotaEnforced):
 		status = http.StatusConflict
 	case errors.Is(err, quotasync.ErrNotApplied):
 		// Logged by quotasync; the message only holds AZ codes.

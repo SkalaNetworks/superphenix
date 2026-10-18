@@ -23,7 +23,7 @@ var (
 	sqlOrgQuota     = regexp.QuoteMeta(`SELECT * FROM "organization_quotas" WHERE organization_id = $1 AND "organization_quotas"."deleted_at" IS NULL LIMIT $2`)
 	sqlProjectQuota = regexp.QuoteMeta(`SELECT * FROM "project_quotas" WHERE project_id = $1 AND "project_quotas"."deleted_at" IS NULL LIMIT $2`)
 	sqlListPQs      = regexp.QuoteMeta(`SELECT * FROM "project_quotas" WHERE (organization_id = $1 AND project_id IN (SELECT "id" FROM "projects" WHERE orga_id = $2 AND "projects"."deleted_at" IS NULL)) AND "project_quotas"."deleted_at" IS NULL ORDER BY project_id`)
-	sqlOtherAZs     = regexp.QuoteMeta(`SELECT * FROM "project_az_quotas" WHERE (project_id = $1 AND code_az <> $2) AND "project_az_quotas"."deleted_at" IS NULL`)
+	sqlProjectAZs   = regexp.QuoteMeta(`SELECT * FROM "project_az_quotas" WHERE project_id = $1 AND "project_az_quotas"."deleted_at" IS NULL`)
 	sqlProjects     = regexp.QuoteMeta(`SELECT * FROM "projects" WHERE orga_id = $1 AND "projects"."deleted_at" IS NULL ORDER BY id`)
 	sqlUpsertOQ     = regexp.QuoteMeta(`INSERT INTO "organization_quotas"`) + `.*ON CONFLICT \("organization_id"\) DO UPDATE SET "resources"="excluded"."resources"`
 	sqlUpsertPQ     = regexp.QuoteMeta(`INSERT INTO "project_quotas"`) + `.*ON CONFLICT \("project_id"\) DO UPDATE SET "organization_id"="excluded"."organization_id","resources"="excluded"."resources"`
@@ -100,16 +100,16 @@ func TestGetOrganizationQuotaOverview(t *testing.T) {
 
 	t.Run("limited", func(t *testing.T) {
 		mock := setupMockDB(t)
-		expectOrgQuota(mock, orgID, `{"cpu":"64","memory":"256Gi","pods":"100"}`)
+		expectOrgQuota(mock, orgID, `{"cpu":"64","memory":"256Gi","storage":"100Gi"}`)
 		expectListPQs(mock, orgID,
-			[2]any{proj1, `{"cpu":"16","memory":"64Gi","pods":"50"}`},
+			[2]any{proj1, `{"cpu":"16","memory":"64Gi","storage":"50Gi"}`},
 			[2]any{proj2, `{"cpu":"500m"}`})
 
 		overview, err := GetOrganizationQuotaOverview(context.Background(), orgID)
 		require.NoError(t, err)
 		assert.False(t, overview.Unlimited)
-		assert.Equal(t, model.QuotaResources{"cpu": "16500m", "memory": "64Gi", "pods": "50"}, overview.Allocated)
-		assert.Equal(t, model.QuotaResources{"cpu": "47500m", "memory": "192Gi", "pods": "50"}, overview.Remaining)
+		assert.Equal(t, model.QuotaResources{"cpu": "16500m", "memory": "64Gi", "storage": "50Gi"}, overview.Allocated)
+		assert.Equal(t, model.QuotaResources{"cpu": "47500m", "memory": "192Gi", "storage": "50Gi"}, overview.Remaining)
 		assert.Len(t, overview.ProjectQuotas, 2)
 	})
 
@@ -138,29 +138,30 @@ func TestSetOrganizationQuota(t *testing.T) {
 		mock.ExpectQuery(sqlProjects).WithArgs(orgID).
 			WillReturnRows(sqlmock.NewRows([]string{"id", "orga_id"}).AddRow(proj1, orgID).AddRow(proj2, orgID))
 		for _, p := range []uuid.UUID{proj1, proj2} {
-			expectUpsertPQ(mock, orgID, p, `{"count/virtualmachines.kubevirt.io":"1","cpu":"32"}`)
+			expectUpsertPQ(mock, orgID, p, `{"cpu":"32","storage":"1"}`)
 			// A share that rounds down to 0 stays limited at 0.
-			expectUpsertAZQ(mock, p, "az-1", `{"count/virtualmachines.kubevirt.io":"0","cpu":"16"}`)
-			expectUpsertAZQ(mock, p, "az-2", `{"count/virtualmachines.kubevirt.io":"0","cpu":"16"}`)
+			expectUpsertAZQ(mock, p, "az-1", `{"cpu":"16","storage":"0"}`)
+			expectUpsertAZQ(mock, p, "az-2", `{"cpu":"16","storage":"0"}`)
 		}
 		mock.ExpectExec(sqlUpsertOQ).WillReturnResult(sqlmock.NewResult(1, 1))
 		mock.ExpectCommit()
 
-		oq, err := SetOrganizationQuota(context.Background(), orgID, model.QuotaResources{"cpu": "64", "count/virtualmachines.kubevirt.io": "2"})
+		oq, err := SetOrganizationQuota(context.Background(), orgID, model.QuotaResources{"cpu": "64", "storage": "2"})
 		require.NoError(t, err)
 		assert.Equal(t, "64", oq.Resources["cpu"])
 	})
 
-	t.Run("existing project quotas must fit", func(t *testing.T) {
+	t.Run("existing project quotas may be overcommitted", func(t *testing.T) {
 		mock := setupMockDB(t)
 
 		mock.ExpectBegin()
 		expectLockOrg(mock, orgID)
 		expectListPQs(mock, orgID, [2]any{proj1, `{"cpu":"32"}`}, [2]any{proj2, `{"cpu":"33"}`})
-		mock.ExpectRollback()
+		mock.ExpectExec(sqlUpsertOQ).WillReturnResult(sqlmock.NewResult(1, 1))
+		mock.ExpectCommit()
 
 		_, err := SetOrganizationQuota(context.Background(), orgID, model.QuotaResources{"cpu": "64"})
-		require.ErrorIs(t, err, ErrOrgQuotaExceeded)
+		require.NoError(t, err, "the project quotas are kept, they can then only be lowered")
 	})
 
 	t.Run("unknown organization", func(t *testing.T) {
@@ -176,7 +177,7 @@ func TestSetOrganizationQuota(t *testing.T) {
 
 	t.Run("invalid resources are rejected before any query", func(t *testing.T) {
 		setupMockDB(t)
-		_, err := SetOrganizationQuota(context.Background(), orgID, model.QuotaResources{"limits.cpu": "64"})
+		_, err := SetOrganizationQuota(context.Background(), orgID, model.QuotaResources{"pods": "64"})
 		require.ErrorIs(t, err, ErrInvalidQuantity)
 	})
 }
@@ -210,10 +211,10 @@ func TestSetProjectQuota(t *testing.T) {
 		expectLockOrg(mock, orgID)
 		expectProject(mock, orgID, projID)
 		expectOrgQuota(mock, orgID, "")
-		expectUpsertPQ(mock, orgID, projID, `{"pods":"1000"}`)
+		expectUpsertPQ(mock, orgID, projID, `{"storage":"1Ti"}`)
 		mock.ExpectCommit()
 
-		_, err := SetProjectQuota(context.Background(), orgID, projID, model.QuotaResources{"pods": "1000"})
+		_, err := SetProjectQuota(context.Background(), orgID, projID, model.QuotaResources{"storage": "1Ti"})
 		require.NoError(t, err)
 	})
 
@@ -248,6 +249,7 @@ func TestSetProjectQuota(t *testing.T) {
 	})
 
 	t.Run("resource not limited by the organization", func(t *testing.T) {
+		setupAZs(t)
 		mock := setupMockDB(t)
 
 		mock.ExpectBegin()
@@ -255,11 +257,44 @@ func TestSetProjectQuota(t *testing.T) {
 		expectProject(mock, orgID, projID)
 		expectOrgQuota(mock, orgID, `{"cpu":"64"}`)
 		expectListPQs(mock, orgID)
+		expectUpsertPQ(mock, orgID, projID, `{"cpu":"1","memory":"1Ti"}`)
+		mock.ExpectCommit()
+
+		_, err := SetProjectQuota(context.Background(), orgID, projID, model.QuotaResources{"cpu": "1", "memory": "1Ti"})
+		require.NoError(t, err)
+	})
+
+	t.Run("overcommitted project quota can be lowered", func(t *testing.T) {
+		setupAZs(t)
+		mock := setupMockDB(t)
+
+		mock.ExpectBegin()
+		expectLockOrg(mock, orgID)
+		expectProject(mock, orgID, projID)
+		expectOrgQuota(mock, orgID, `{"cpu":"64","memory":"64Gi"}`)
+		expectListPQs(mock, orgID, [2]any{otherProjID, `{"cpu":"48","memory":"48Gi"}`}, [2]any{projID, `{"cpu":"40","memory":"8Gi"}`})
+		expectUpsertPQ(mock, orgID, projID, `{"cpu":"30","memory":"8Gi"}`)
+		mock.ExpectCommit()
+
+		// 48 + 30 > 64 cpu, still overcommitted, but lowered.
+		_, err := SetProjectQuota(context.Background(), orgID, projID, model.QuotaResources{"cpu": "30", "memory": "8Gi"})
+		require.NoError(t, err)
+	})
+
+	t.Run("overcommitted project quota cannot be increased", func(t *testing.T) {
+		mock := setupMockDB(t)
+
+		mock.ExpectBegin()
+		expectLockOrg(mock, orgID)
+		expectProject(mock, orgID, projID)
+		expectOrgQuota(mock, orgID, `{"cpu":"64","memory":"64Gi"}`)
+		expectListPQs(mock, orgID, [2]any{otherProjID, `{"cpu":"48","memory":"48Gi"}`}, [2]any{projID, `{"cpu":"40","memory":"8Gi"}`})
 		mock.ExpectRollback()
 
-		_, err := SetProjectQuota(context.Background(), orgID, projID, model.QuotaResources{"cpu": "1", "pods": "10000"})
+		// cpu is lowered, but memory goes beyond what is left (48 + 20 > 64).
+		_, err := SetProjectQuota(context.Background(), orgID, projID, model.QuotaResources{"cpu": "30", "memory": "20Gi"})
 		require.ErrorIs(t, err, ErrOrgQuotaExceeded)
-		assert.Contains(t, err.Error(), "pods not limited by the organization quota")
+		assert.Contains(t, err.Error(), "memory")
 	})
 
 	t.Run("project of another organization", func(t *testing.T) {
@@ -278,9 +313,10 @@ func TestSetProjectQuota(t *testing.T) {
 func TestSetProjectAZQuota(t *testing.T) {
 	orgID, projID := uuid.New(), uuid.New()
 
-	expectOtherAZs := func(mock sqlmock.Sqlmock, resources string) {
-		mock.ExpectQuery(sqlOtherAZs).WithArgs(projID, "az-1").
-			WillReturnRows(sqlmock.NewRows([]string{"project_id", "code_az", "resources"}).AddRow(projID, "az-2", resources))
+	expectAZs := func(mock sqlmock.Sqlmock, az1, az2 string) {
+		mock.ExpectQuery(sqlProjectAZs).WithArgs(projID).
+			WillReturnRows(sqlmock.NewRows([]string{"project_id", "code_az", "resources"}).
+				AddRow(projID, "az-1", az1).AddRow(projID, "az-2", az2))
 	}
 	expectPQ := func(mock sqlmock.Sqlmock, resources string) {
 		q := mock.ExpectQuery(sqlProjectQuota).WithArgs(projID, 1)
@@ -298,12 +334,12 @@ func TestSetProjectAZQuota(t *testing.T) {
 		mock.ExpectBegin()
 		expectLockOrg(mock, orgID)
 		expectProject(mock, orgID, projID)
-		expectPQ(mock, `{"cpu":"32","pods":"20"}`)
-		expectOtherAZs(mock, `{"cpu":"16","pods":"10"}`)
-		expectUpsertAZQ(mock, projID, "az-1", `{"cpu":"16","pods":"10"}`)
+		expectPQ(mock, `{"cpu":"32","storage":"20Gi"}`)
+		expectAZs(mock, `{"cpu":"1"}`, `{"cpu":"16","storage":"10Gi"}`)
+		expectUpsertAZQ(mock, projID, "az-1", `{"cpu":"16","storage":"10Gi"}`)
 		mock.ExpectCommit()
 
-		azq, err := SetProjectAZQuota(context.Background(), orgID, projID, "az-1", model.QuotaResources{"cpu": "16", "pods": "10"})
+		azq, err := SetProjectAZQuota(context.Background(), orgID, projID, "az-1", model.QuotaResources{"cpu": "16", "storage": "10Gi"})
 		require.NoError(t, err)
 		assert.Equal(t, "az-1", azq.CodeAZ)
 	})
@@ -316,10 +352,41 @@ func TestSetProjectAZQuota(t *testing.T) {
 		expectLockOrg(mock, orgID)
 		expectProject(mock, orgID, projID)
 		expectPQ(mock, `{"cpu":"32"}`)
-		expectOtherAZs(mock, `{"cpu":"20"}`)
+		expectAZs(mock, `{"cpu":"1"}`, `{"cpu":"20"}`)
 		mock.ExpectRollback()
 
 		_, err := SetProjectAZQuota(context.Background(), orgID, projID, "az-1", model.QuotaResources{"cpu": "16"})
+		require.ErrorIs(t, err, ErrProjectQuotaExceeded)
+	})
+
+	t.Run("overcommitted AZ quota can be lowered", func(t *testing.T) {
+		setupAZs(t, "az-1", "az-2")
+		mock := setupMockDB(t)
+
+		mock.ExpectBegin()
+		expectLockOrg(mock, orgID)
+		expectProject(mock, orgID, projID)
+		expectPQ(mock, `{"cpu":"32"}`)
+		expectAZs(mock, `{"cpu":"30"}`, `{"cpu":"20"}`)
+		expectUpsertAZQ(mock, projID, "az-1", `{"cpu":"25"}`)
+		mock.ExpectCommit()
+
+		_, err := SetProjectAZQuota(context.Background(), orgID, projID, "az-1", model.QuotaResources{"cpu": "25"})
+		require.NoError(t, err)
+	})
+
+	t.Run("overcommitted AZ quota cannot be increased", func(t *testing.T) {
+		setupAZs(t, "az-1", "az-2")
+		mock := setupMockDB(t)
+
+		mock.ExpectBegin()
+		expectLockOrg(mock, orgID)
+		expectProject(mock, orgID, projID)
+		expectPQ(mock, `{"cpu":"32"}`)
+		expectAZs(mock, `{"cpu":"30"}`, `{"cpu":"20"}`)
+		mock.ExpectRollback()
+
+		_, err := SetProjectAZQuota(context.Background(), orgID, projID, "az-1", model.QuotaResources{"cpu": "31"})
 		require.ErrorIs(t, err, ErrProjectQuotaExceeded)
 	})
 
@@ -331,11 +398,12 @@ func TestSetProjectAZQuota(t *testing.T) {
 		expectLockOrg(mock, orgID)
 		expectProject(mock, orgID, projID)
 		expectPQ(mock, `{"cpu":"32"}`)
-		expectOtherAZs(mock, `{}`)
-		mock.ExpectRollback()
+		expectAZs(mock, `{}`, `{}`)
+		expectUpsertAZQ(mock, projID, "az-1", `{"cpu":"1","memory":"1Ti"}`)
+		mock.ExpectCommit()
 
-		_, err := SetProjectAZQuota(context.Background(), orgID, projID, "az-1", model.QuotaResources{"cpu": "1", "pods": "1000"})
-		require.ErrorIs(t, err, ErrProjectQuotaExceeded)
+		_, err := SetProjectAZQuota(context.Background(), orgID, projID, "az-1", model.QuotaResources{"cpu": "1", "memory": "1Ti"})
+		require.NoError(t, err)
 	})
 
 	t.Run("project without quota", func(t *testing.T) {
@@ -346,10 +414,45 @@ func TestSetProjectAZQuota(t *testing.T) {
 		expectLockOrg(mock, orgID)
 		expectProject(mock, orgID, projID)
 		expectPQ(mock, "")
+		expectOrgQuota(mock, orgID, "")
+		expectUpsertAZQ(mock, projID, "az-1", `{"memory":"1Ti"}`)
+		mock.ExpectCommit()
+
+		_, err := SetProjectAZQuota(context.Background(), orgID, projID, "az-1", model.QuotaResources{"memory": "1Ti"})
+		require.NoError(t, err)
+	})
+
+	t.Run("project without quota in a limited organization", func(t *testing.T) {
+		setupAZs(t, "az-1", "az-2")
+
+		// Resources the organization does not limit are free.
+		mock := setupMockDB(t)
+		mock.ExpectBegin()
+		expectLockOrg(mock, orgID)
+		expectProject(mock, orgID, projID)
+		expectPQ(mock, "")
+		expectOrgQuota(mock, orgID, `{"cpu":"64"}`)
+		expectAZs(mock, `{}`, `{}`)
+		expectUpsertAZQ(mock, projID, "az-1", `{"memory":"1Ti"}`)
+		mock.ExpectCommit()
+		_, err := SetProjectAZQuota(context.Background(), orgID, projID, "az-1", model.QuotaResources{"memory": "1Ti"})
+		require.NoError(t, err)
+	})
+
+	t.Run("project without quota cannot take resources limited by the organization", func(t *testing.T) {
+		setupAZs(t, "az-1", "az-2")
+		mock := setupMockDB(t)
+
+		mock.ExpectBegin()
+		expectLockOrg(mock, orgID)
+		expectProject(mock, orgID, projID)
+		expectPQ(mock, "")
+		expectOrgQuota(mock, orgID, `{"cpu":"64"}`)
+		expectAZs(mock, `{}`, `{}`)
 		mock.ExpectRollback()
 
-		_, err := SetProjectAZQuota(context.Background(), orgID, projID, "az-1", model.QuotaResources{"pods": "1000"})
-		require.ErrorIs(t, err, ErrProjectQuotaRequired)
+		_, err := SetProjectAZQuota(context.Background(), orgID, projID, "az-1", model.QuotaResources{"cpu": "1"})
+		require.ErrorIs(t, err, ErrProjectQuotaExceeded)
 	})
 
 	t.Run("unknown or non whitelisted AZ", func(t *testing.T) {

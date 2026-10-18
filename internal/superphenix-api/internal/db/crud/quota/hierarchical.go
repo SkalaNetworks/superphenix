@@ -4,522 +4,452 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"slices"
+	"strings"
 
 	"github.com/google/uuid"
 	"gorm.io/gorm"
-	"k8s.io/apimachinery/pkg/api/resource"
+	"gorm.io/gorm/clause"
 
 	"github.com/super-phenix/superphenix/internal/superphenix-api/internal/az"
 	"github.com/super-phenix/superphenix/internal/superphenix-api/internal/db"
 	"github.com/super-phenix/superphenix/internal/superphenix-api/internal/db/model"
+	"github.com/super-phenix/superphenix/internal/superphenix-api/pkg/config"
+	spxQuota "github.com/super-phenix/superphenix/internal/superphenix-api/pkg/quota"
 )
 
+// Business errors of the hierarchical quotas. Every one of them is caused by the request
+// (and is safe to return to the caller); any other error is an internal error.
 var (
+	ErrInvalidQuantity      = spxQuota.ErrInvalidResources
 	ErrOrgQuotaExceeded     = errors.New("organization quota exceeded")
 	ErrProjectQuotaExceeded = errors.New("project quota exceeded")
-	ErrInvalidQuantity      = errors.New("invalid resource quantity")
+	ErrOrganizationNotFound = errors.New("organization not found")
+	ErrProjectNotFound      = errors.New("project not found")
+	ErrAZNotFound           = errors.New("availability zone not found")
+	ErrProjectQuotaRequired = errors.New("the project has no quota: AZ quotas can only split a project quota")
+	ErrProjectQuotaEnforced = errors.New("the project quota cannot be removed while the organization has a quota")
 )
 
-// ParsedResources represents canonical numeric quantities of resources.
-type ParsedResources struct {
-	MilliCPU int64
-	Memory   int64 // bytes
-	Disk     int64 // bytes
+// OrganizationQuotaOverview is the quota of an organization and its distribution to projects.
+type OrganizationQuotaOverview struct {
+	OrganizationId string               `json:"organizationId"`
+	Unlimited      bool                 `json:"unlimited"`
+	Resources      model.QuotaResources `json:"resources,omitempty"`
+	Allocated      model.QuotaResources `json:"allocated"`
+	Remaining      model.QuotaResources `json:"remaining,omitempty"`
+	ProjectQuotas  []model.ProjectQuota `json:"projectQuotas"`
 }
 
-// ParseResources parses a model.QuotaResources into canonical numeric quantities.
-func ParseResources(r model.QuotaResources) (ParsedResources, error) {
-	var res ParsedResources
-
-	if r.CPU != "" {
-		q, err := resource.ParseQuantity(r.CPU)
-		if err != nil {
-			return res, fmt.Errorf("%w: invalid cpu %q: %v", ErrInvalidQuantity, r.CPU, err)
-		}
-		if q.MilliValue() < 0 {
-			return res, fmt.Errorf("%w: cpu cannot be negative", ErrInvalidQuantity)
-		}
-		res.MilliCPU = q.MilliValue()
-	}
-
-	if r.Memory != "" {
-		q, err := resource.ParseQuantity(r.Memory)
-		if err != nil {
-			return res, fmt.Errorf("%w: invalid memory %q: %v", ErrInvalidQuantity, r.Memory, err)
-		}
-		if q.Value() < 0 {
-			return res, fmt.Errorf("%w: memory cannot be negative", ErrInvalidQuantity)
-		}
-		res.Memory = q.Value()
-	}
-
-	if r.Disk != "" {
-		q, err := resource.ParseQuantity(r.Disk)
-		if err != nil {
-			return res, fmt.Errorf("%w: invalid disk %q: %v", ErrInvalidQuantity, r.Disk, err)
-		}
-		if q.Value() < 0 {
-			return res, fmt.Errorf("%w: disk cannot be negative", ErrInvalidQuantity)
-		}
-		res.Disk = q.Value()
-	}
-
-	return res, nil
+// ProjectQuotaOverview is the quota of a project and its distribution to AZs.
+type ProjectQuotaOverview struct {
+	ProjectId      string                 `json:"projectId"`
+	OrganizationId string                 `json:"organizationId"`
+	Resources      model.QuotaResources   `json:"resources,omitempty"`
+	AZQuotas       []model.ProjectAZQuota `json:"azQuotas"`
 }
 
-// ToQuotaResources formats ParsedResources back into standard string representations.
-func (p ParsedResources) ToQuotaResources() model.QuotaResources {
-	var r model.QuotaResources
-	if p.MilliCPU > 0 {
-		if p.MilliCPU%1000 == 0 {
-			r.CPU = fmt.Sprintf("%d", p.MilliCPU/1000)
-		} else {
-			r.CPU = fmt.Sprintf("%dm", p.MilliCPU)
-		}
-	}
-	if p.Memory > 0 {
-		r.Memory = resource.NewQuantity(p.Memory, resource.BinarySI).String()
-	}
-	if p.Disk > 0 {
-		r.Disk = resource.NewQuantity(p.Disk, resource.BinarySI).String()
-	}
-	return r
-}
+// GetOrganizationQuotaOverview returns the organization quota (unlimited when not defined),
+// the sum allocated to its projects and what remains.
+func GetOrganizationQuotaOverview(ctx context.Context, orgId uuid.UUID) (OrganizationQuotaOverview, error) {
+	tx := db.Client.WithContext(ctx)
+	overview := OrganizationQuotaOverview{OrganizationId: orgId.String(), Unlimited: true}
 
-// SplitEqually divides ParsedResources into count equal parts using integer floor division.
-func (p ParsedResources) SplitEqually(count int) ParsedResources {
-	if count <= 0 {
-		return ParsedResources{}
-	}
-	return ParsedResources{
-		MilliCPU: p.MilliCPU / int64(count),
-		Memory:   p.Memory / int64(count),
-		Disk:     p.Disk / int64(count),
-	}
-}
-
-// Add sums two ParsedResources.
-func (p ParsedResources) Add(other ParsedResources) ParsedResources {
-	return ParsedResources{
-		MilliCPU: p.MilliCPU + other.MilliCPU,
-		Memory:   p.Memory + other.Memory,
-		Disk:     p.Disk + other.Disk,
-	}
-}
-
-// Sub subtracts other from p (clamping to 0).
-func (p ParsedResources) Sub(other ParsedResources) ParsedResources {
-	milliCPU := p.MilliCPU - other.MilliCPU
-	if milliCPU < 0 {
-		milliCPU = 0
-	}
-	mem := p.Memory - other.Memory
-	if mem < 0 {
-		mem = 0
-	}
-	disk := p.Disk - other.Disk
-	if disk < 0 {
-		disk = 0
-	}
-	return ParsedResources{
-		MilliCPU: milliCPU,
-		Memory:   mem,
-		Disk:     disk,
-	}
-}
-
-// Exceeds checks if p exceeds limit for any resource where limit > 0.
-func (p ParsedResources) Exceeds(limit ParsedResources) (bool, string) {
-	if limit.MilliCPU > 0 && p.MilliCPU > limit.MilliCPU {
-		return true, fmt.Sprintf("CPU quota exceeded: requested %s exceeds limit %s",
-			resource.NewMilliQuantity(p.MilliCPU, resource.DecimalSI).String(),
-			resource.NewMilliQuantity(limit.MilliCPU, resource.DecimalSI).String())
-	}
-	if limit.Memory > 0 && p.Memory > limit.Memory {
-		return true, fmt.Sprintf("Memory quota exceeded: requested %s exceeds limit %s",
-			resource.NewQuantity(p.Memory, resource.BinarySI).String(),
-			resource.NewQuantity(limit.Memory, resource.BinarySI).String())
-	}
-	if limit.Disk > 0 && p.Disk > limit.Disk {
-		return true, fmt.Sprintf("Disk quota exceeded: requested %s exceeds limit %s",
-			resource.NewQuantity(p.Disk, resource.BinarySI).String(),
-			resource.NewQuantity(limit.Disk, resource.BinarySI).String())
-	}
-	return false, ""
-}
-
-// GetOrganizationQuota retrieves an organization's quota, or nil if unlimited.
-func GetOrganizationQuota(ctx context.Context, orgId uuid.UUID) (*model.OrganizationQuota, error) {
-	var oq model.OrganizationQuota
-	err := db.Client.WithContext(ctx).Where("organization_id = ?", orgId).First(&oq).Error
+	oq, err := findOrganizationQuota(tx, orgId)
 	if err != nil {
-		if errors.Is(err, gorm.ErrRecordNotFound) {
-			return nil, nil
-		}
-		return nil, err
+		return overview, err
 	}
-	return &oq, nil
+	pqs, err := listProjectQuotas(tx, orgId)
+	if err != nil {
+		return overview, err
+	}
+	allocated, err := sumProjectQuotas(pqs)
+	if err != nil {
+		return overview, err
+	}
+
+	overview.ProjectQuotas = pqs
+	overview.Allocated = allocated.Resources()
+	if oq != nil {
+		parsedOrg, err := oq.Resources.Parse()
+		if err != nil {
+			return overview, err
+		}
+		overview.Unlimited = false
+		overview.Resources = oq.Resources
+		overview.Remaining = parsedOrg.Sub(allocated).Resources()
+	}
+	return overview, nil
+}
+
+// GetProjectQuotaOverview returns the quota of a project of the organization and its AZ quotas.
+func GetProjectQuotaOverview(ctx context.Context, orgId, projectId uuid.UUID) (ProjectQuotaOverview, error) {
+	tx := db.Client.WithContext(ctx)
+	overview := ProjectQuotaOverview{ProjectId: projectId.String(), OrganizationId: orgId.String()}
+
+	if err := checkProject(tx, orgId, projectId); err != nil {
+		return overview, err
+	}
+	pq, err := findProjectQuota(tx, projectId)
+	if err != nil {
+		return overview, err
+	}
+	if pq != nil {
+		overview.Resources = pq.Resources
+	}
+	if err := tx.Where("project_id = ?", projectId).Order("code_az").Find(&overview.AZQuotas).Error; err != nil {
+		return overview, err
+	}
+	return overview, nil
+}
+
+// Hierarchy holds the quotas applying to a project. A nil level has no quota.
+// Kubernetes only enforces what the AZ controllers are sent, see the quotasync package.
+type Hierarchy struct {
+	Organization model.QuotaResources
+	Project      model.QuotaResources
+	AZs          map[string]model.QuotaResources
+}
+
+// AZ returns the abstract quota to enforce in the given AZ of the project.
+func (h Hierarchy) AZ(codeAZ string) model.QuotaResources {
+	return spxQuota.EffectiveAZQuota(h.Organization, h.Project, h.AZs[codeAZ])
+}
+
+// GetHierarchy returns the organization, project and AZ quotas of a project.
+func GetHierarchy(ctx context.Context, orgId, projectId uuid.UUID) (Hierarchy, error) {
+	tx := db.Client.WithContext(ctx)
+	h := Hierarchy{AZs: map[string]model.QuotaResources{}}
+
+	oq, err := findOrganizationQuota(tx, orgId)
+	if err != nil {
+		return h, err
+	}
+	if oq != nil {
+		h.Organization = oq.Resources
+	}
+	pq, err := findProjectQuota(tx, projectId)
+	if err != nil {
+		return h, err
+	}
+	if pq != nil {
+		h.Project = pq.Resources
+	}
+	var azqs []model.ProjectAZQuota
+	if err := tx.Where("project_id = ?", projectId).Find(&azqs).Error; err != nil {
+		return h, err
+	}
+	for _, azq := range azqs {
+		h.AZs[azq.CodeAZ] = azq.Resources
+	}
+	return h, nil
+}
+
+// ListProjectIds returns the IDs of the live projects of the organization.
+func ListProjectIds(ctx context.Context, orgId uuid.UUID) ([]uuid.UUID, error) {
+	var ids []uuid.UUID
+	err := db.Client.WithContext(ctx).Model(&model.Project{}).Where("orga_id = ?", orgId).Order("id").Pluck("id", &ids).Error
+	return ids, err
 }
 
 // GetProjectQuota retrieves a project's quota, or nil if not defined.
 func GetProjectQuota(ctx context.Context, projectId uuid.UUID) (*model.ProjectQuota, error) {
-	var pq model.ProjectQuota
-	err := db.Client.WithContext(ctx).Where("project_id = ?", projectId).First(&pq).Error
-	if err != nil {
-		if errors.Is(err, gorm.ErrRecordNotFound) {
-			return nil, nil
-		}
-		return nil, err
-	}
-	return &pq, nil
+	return findProjectQuota(db.Client.WithContext(ctx), projectId)
 }
 
-// ListProjectQuotasByOrg retrieves all project quotas within an organization.
-func ListProjectQuotasByOrg(ctx context.Context, orgId uuid.UUID) ([]model.ProjectQuota, error) {
-	var pqs []model.ProjectQuota
-	err := db.Client.WithContext(ctx).Where("organization_id = ?", orgId).Find(&pqs).Error
-	if err != nil {
-		return nil, err
-	}
-	return pqs, nil
-}
-
-// GetProjectAZQuota retrieves an AZ quota for a project, or nil if not defined.
-func GetProjectAZQuota(ctx context.Context, projectId uuid.UUID, codeAZ string) (*model.ProjectAZQuota, error) {
-	var azq model.ProjectAZQuota
-	err := db.Client.WithContext(ctx).Where("project_id = ? AND code_az = ?", projectId, codeAZ).First(&azq).Error
-	if err != nil {
-		if errors.Is(err, gorm.ErrRecordNotFound) {
-			return nil, nil
-		}
-		return nil, err
-	}
-	return &azq, nil
-}
-
-// ListProjectAZQuotas retrieves all AZ quotas for a given project.
-func ListProjectAZQuotas(ctx context.Context, projectId uuid.UUID) ([]model.ProjectAZQuota, error) {
-	var azqs []model.ProjectAZQuota
-	err := db.Client.WithContext(ctx).Where("project_id = ?", projectId).Find(&azqs).Error
-	if err != nil {
-		return nil, err
-	}
-	return azqs, nil
-}
-
-// SetOrganizationQuota creates or updates an organization quota.
-// If activating quotas and no project quotas exist for pre-existing projects,
-// the virtual quota is split equally among all pre-existing projects and immediately across their AZs.
+// SetOrganizationQuota creates or updates an organization quota (platform administrators only).
+//
+// When no project quota exists yet, the organization quota is split equally among the
+// projects of the organization, and each project quota among the AZs of the organization.
+// Otherwise the existing project quotas must fit in the new organization quota.
 func SetOrganizationQuota(ctx context.Context, orgId uuid.UUID, resources model.QuotaResources) (*model.OrganizationQuota, error) {
-	parsedOrg, err := ParseResources(resources)
+	parsedOrg, err := resources.Parse()
 	if err != nil {
 		return nil, err
 	}
 
-	var savedOQ model.OrganizationQuota
-
+	saved := model.OrganizationQuota{OrganizationId: orgId, Resources: resources}
 	err = db.Client.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
-		var projects []model.Project
-		if err := tx.Where("orga_id = ?", orgId).Find(&projects).Error; err != nil {
+		if err := lockOrganization(tx, orgId); err != nil {
 			return err
 		}
 
-		var existingPQs []model.ProjectQuota
-		if err := tx.Where("organization_id = ?", orgId).Find(&existingPQs).Error; err != nil {
+		pqs, err := listProjectQuotas(tx, orgId)
+		if err != nil {
 			return err
 		}
 
-		// Auto-split rule: if activating quotas and none are defined for pre-existing projects
-		if len(existingPQs) == 0 && len(projects) > 0 {
-			projectSlice := parsedOrg.SplitEqually(len(projects))
-			projectRes := projectSlice.ToQuotaResources()
-
-			azConfigs := az.FindAll(orgId.String())
-
+		if len(pqs) > 0 {
+			allocated, err := sumProjectQuotas(pqs)
+			if err != nil {
+				return err
+			}
+			if msg, exceeded := allocated.Exceeds(parsedOrg); exceeded {
+				return fmt.Errorf("%w: existing project quotas: %s", ErrOrgQuotaExceeded, msg)
+			}
+		} else {
+			var projects []model.Project
+			if err := tx.Where("orga_id = ?", orgId).Order("id").Find(&projects).Error; err != nil {
+				return err
+			}
+			share := parsedOrg.SplitEqually(len(projects))
 			for _, p := range projects {
-				var existingPQ model.ProjectQuota
-				err := tx.Where("project_id = ?", p.ID).First(&existingPQ).Error
-				if err != nil && !errors.Is(err, gorm.ErrRecordNotFound) {
+				if _, err := saveProjectQuota(tx, orgId, p.ID, share.Resources(), share); err != nil {
 					return err
 				}
-				if errors.Is(err, gorm.ErrRecordNotFound) {
-					newPQ := model.ProjectQuota{
-						ProjectId:      p.ID,
-						OrganizationId: orgId,
-						Resources:      projectRes,
-					}
-					if err := tx.Create(&newPQ).Error; err != nil {
-						return err
-					}
-				} else {
-					existingPQ.OrganizationId = orgId
-					existingPQ.Resources = projectRes
-					if err := tx.Save(&existingPQ).Error; err != nil {
-						return err
-					}
-				}
-
-				if len(azConfigs) > 0 {
-					azSlice := projectSlice.SplitEqually(len(azConfigs))
-					azRes := azSlice.ToQuotaResources()
-
-					for _, azCfg := range azConfigs {
-						var existingAZQ model.ProjectAZQuota
-						err := tx.Where("project_id = ? AND code_az = ?", p.ID, azCfg.Code).First(&existingAZQ).Error
-						if err != nil && !errors.Is(err, gorm.ErrRecordNotFound) {
-							return err
-						}
-						if errors.Is(err, gorm.ErrRecordNotFound) {
-							newAZQ := model.ProjectAZQuota{
-								ProjectId: p.ID,
-								CodeAZ:    azCfg.Code,
-								Resources: azRes,
-							}
-							if err := tx.Create(&newAZQ).Error; err != nil {
-								return err
-							}
-						} else {
-							existingAZQ.Resources = azRes
-							if err := tx.Save(&existingAZQ).Error; err != nil {
-								return err
-							}
-						}
-					}
-				}
-			}
-		} else if len(existingPQs) > 0 {
-			// Validate that existing project quotas sum does not exceed new org quota
-			var totalProjects ParsedResources
-			for _, pq := range existingPQs {
-				pParsed, err := ParseResources(pq.Resources)
-				if err != nil {
-					return err
-				}
-				totalProjects = totalProjects.Add(pParsed)
-			}
-			if exceeded, msg := totalProjects.Exceeds(parsedOrg); exceeded {
-				return fmt.Errorf("%w: %s", ErrOrgQuotaExceeded, msg)
 			}
 		}
 
-		var existingOQ model.OrganizationQuota
-		err := tx.Where("organization_id = ?", orgId).First(&existingOQ).Error
-		if err != nil && !errors.Is(err, gorm.ErrRecordNotFound) {
-			return err
-		}
-		if errors.Is(err, gorm.ErrRecordNotFound) {
-			savedOQ = model.OrganizationQuota{
-				OrganizationId: orgId,
-				Resources:      resources,
-			}
-			if err := tx.Create(&savedOQ).Error; err != nil {
-				return err
-			}
-		} else {
-			existingOQ.Resources = resources
-			savedOQ = existingOQ
-			if err := tx.Save(&savedOQ).Error; err != nil {
-				return err
-			}
-		}
-		return nil
+		return upsert(tx, &saved, []string{"organization_id"}, "resources")
 	})
-
 	if err != nil {
 		return nil, err
 	}
-	return &savedOQ, nil
+	return &saved, nil
 }
 
-// SetProjectQuota sets a project quota, validating against organization quota if defined,
-// and immediately splitting the project quota equally across all active AZs of the project.
-func SetProjectQuota(ctx context.Context, orgId uuid.UUID, projectId uuid.UUID, resources model.QuotaResources) (*model.ProjectQuota, error) {
-	parsedProj, err := ParseResources(resources)
+// SetProjectQuota sets the quota of a project of the organization, and splits it equally
+// among the AZs of the organization (overwriting the previous AZ quotas).
+//
+// When the organization has a quota, the project can only limit resources limited by the
+// organization, and the sum of the project quotas must fit in the organization quota.
+func SetProjectQuota(ctx context.Context, orgId, projectId uuid.UUID, resources model.QuotaResources) (*model.ProjectQuota, error) {
+	parsedProj, err := resources.Parse()
 	if err != nil {
 		return nil, err
 	}
 
-	var savedPQ model.ProjectQuota
-
+	var saved model.ProjectQuota
 	err = db.Client.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
-		// Check org quota if present
-		var oq model.OrganizationQuota
-		err := tx.Where("organization_id = ?", orgId).First(&oq).Error
-		if err != nil && !errors.Is(err, gorm.ErrRecordNotFound) {
+		if err := lockOrganization(tx, orgId); err != nil {
 			return err
 		}
-		if err == nil {
-			parsedOrg, err := ParseResources(oq.Resources)
+		if err := checkProject(tx, orgId, projectId); err != nil {
+			return err
+		}
+
+		oq, err := findOrganizationQuota(tx, orgId)
+		if err != nil {
+			return err
+		}
+		if oq != nil {
+			parsedOrg, err := oq.Resources.Parse()
 			if err != nil {
 				return err
 			}
-
-			var otherPQs []model.ProjectQuota
-			if err := tx.Where("organization_id = ? AND project_id != ?", orgId, projectId).Find(&otherPQs).Error; err != nil {
-				return err
-			}
-
-			var totalProjects ParsedResources
-			for _, pq := range otherPQs {
-				pParsed, err := ParseResources(pq.Resources)
-				if err != nil {
-					return err
-				}
-				totalProjects = totalProjects.Add(pParsed)
-			}
-			totalProjects = totalProjects.Add(parsedProj)
-
-			if exceeded, msg := totalProjects.Exceeds(parsedOrg); exceeded {
-				return fmt.Errorf("%w: %s", ErrOrgQuotaExceeded, msg)
-			}
-		}
-
-		var existingPQ model.ProjectQuota
-		err = tx.Where("project_id = ?", projectId).First(&existingPQ).Error
-		if err != nil && !errors.Is(err, gorm.ErrRecordNotFound) {
-			return err
-		}
-		if errors.Is(err, gorm.ErrRecordNotFound) {
-			savedPQ = model.ProjectQuota{
-				ProjectId:      projectId,
-				OrganizationId: orgId,
-				Resources:      resources,
-			}
-			if err := tx.Create(&savedPQ).Error; err != nil {
-				return err
-			}
-		} else {
-			existingPQ.OrganizationId = orgId
-			existingPQ.Resources = resources
-			savedPQ = existingPQ
-			if err := tx.Save(&savedPQ).Error; err != nil {
-				return err
-			}
-		}
-
-		// Immediately split equally across available AZs
-		azConfigs := az.FindAll(orgId.String())
-		if len(azConfigs) > 0 {
-			azSlice := parsedProj.SplitEqually(len(azConfigs))
-			azRes := azSlice.ToQuotaResources()
-
-			for _, azCfg := range azConfigs {
-				var existingAZQ model.ProjectAZQuota
-				err := tx.Where("project_id = ? AND code_az = ?", projectId, azCfg.Code).First(&existingAZQ).Error
-				if err != nil && !errors.Is(err, gorm.ErrRecordNotFound) {
-					return err
-				}
-				if errors.Is(err, gorm.ErrRecordNotFound) {
-					newAZQ := model.ProjectAZQuota{
-						ProjectId: projectId,
-						CodeAZ:    azCfg.Code,
-						Resources: azRes,
-					}
-					if err := tx.Create(&newAZQ).Error; err != nil {
-						return err
-					}
-				} else {
-					existingAZQ.Resources = azRes
-					if err := tx.Save(&existingAZQ).Error; err != nil {
-						return err
-					}
-				}
-			}
-		}
-
-		return nil
-	})
-
-	if err != nil {
-		return nil, err
-	}
-	return &savedPQ, nil
-}
-
-// SetProjectAZQuota manually sets an AZ quota for a project, validating against project quota.
-func SetProjectAZQuota(ctx context.Context, projectId uuid.UUID, codeAZ string, resources model.QuotaResources) (*model.ProjectAZQuota, error) {
-	parsedAZ, err := ParseResources(resources)
-	if err != nil {
-		return nil, err
-	}
-
-	var savedAZQ model.ProjectAZQuota
-
-	err = db.Client.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
-		// Check project quota
-		var pq model.ProjectQuota
-		err := tx.Where("project_id = ?", projectId).First(&pq).Error
-		if err != nil && !errors.Is(err, gorm.ErrRecordNotFound) {
-			return err
-		}
-		if err == nil {
-			parsedProj, err := ParseResources(pq.Resources)
+			pqs, err := listProjectQuotas(tx, orgId)
 			if err != nil {
 				return err
 			}
-
-			var otherAZs []model.ProjectAZQuota
-			if err := tx.Where("project_id = ? AND code_az != ?", projectId, codeAZ).Find(&otherAZs).Error; err != nil {
+			others := slices.DeleteFunc(pqs, func(pq model.ProjectQuota) bool { return pq.ProjectId == projectId })
+			allocated, err := sumProjectQuotas(others)
+			if err != nil {
 				return err
 			}
-
-			var totalAZs ParsedResources
-			for _, azq := range otherAZs {
-				aParsed, err := ParseResources(azq.Resources)
-				if err != nil {
-					return err
-				}
-				totalAZs = totalAZs.Add(aParsed)
-			}
-			totalAZs = totalAZs.Add(parsedAZ)
-
-			if exceeded, msg := totalAZs.Exceeds(parsedProj); exceeded {
-				return fmt.Errorf("%w: %s", ErrProjectQuotaExceeded, msg)
-			}
-		}
-
-		var existingAZQ model.ProjectAZQuota
-		err = tx.Where("project_id = ? AND code_az = ?", projectId, codeAZ).First(&existingAZQ).Error
-		if err != nil && !errors.Is(err, gorm.ErrRecordNotFound) {
-			return err
-		}
-		if errors.Is(err, gorm.ErrRecordNotFound) {
-			savedAZQ = model.ProjectAZQuota{
-				ProjectId: projectId,
-				CodeAZ:    codeAZ,
-				Resources: resources,
-			}
-			if err := tx.Create(&savedAZQ).Error; err != nil {
-				return err
-			}
-		} else {
-			existingAZQ.Resources = resources
-			savedAZQ = existingAZQ
-			if err := tx.Save(&savedAZQ).Error; err != nil {
+			if err := checkWithin(parsedProj, allocated, parsedOrg, ErrOrgQuotaExceeded, "organization"); err != nil {
 				return err
 			}
 		}
 
-		return nil
+		saved, err = saveProjectQuota(tx, orgId, projectId, resources, parsedProj)
+		return err
 	})
-
 	if err != nil {
 		return nil, err
 	}
-	return &savedAZQ, nil
+	return &saved, nil
 }
 
-// DeleteOrganizationQuota deletes an organization quota.
+// SetProjectAZQuota sets the quota of a project in one AZ. The project must have a quota:
+// the AZ can only limit resources limited by the project, and the sum of the AZ quotas
+// must fit in the project quota.
+func SetProjectAZQuota(ctx context.Context, orgId, projectId uuid.UUID, codeAZ string, resources model.QuotaResources) (*model.ProjectAZQuota, error) {
+	parsedAZ, err := resources.Parse()
+	if err != nil {
+		return nil, err
+	}
+	if _, err := az.GetByCode(codeAZ, orgId.String()); err != nil {
+		return nil, ErrAZNotFound
+	}
+
+	saved := model.ProjectAZQuota{ProjectId: projectId, CodeAZ: codeAZ, Resources: resources}
+	err = db.Client.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
+		if err := lockOrganization(tx, orgId); err != nil {
+			return err
+		}
+		if err := checkProject(tx, orgId, projectId); err != nil {
+			return err
+		}
+
+		pq, err := findProjectQuota(tx, projectId)
+		if err != nil {
+			return err
+		}
+		if pq == nil {
+			return ErrProjectQuotaRequired
+		}
+		parsedProj, err := pq.Resources.Parse()
+		if err != nil {
+			return err
+		}
+
+		var others []model.ProjectAZQuota
+		if err := tx.Where("project_id = ? AND code_az <> ?", projectId, codeAZ).Find(&others).Error; err != nil {
+			return err
+		}
+		allocated := spxQuota.Quantities{}
+		for _, azq := range others {
+			parsed, err := azq.Resources.Parse()
+			if err != nil {
+				return err
+			}
+			allocated = allocated.Add(parsed)
+		}
+		if err := checkWithin(parsedAZ, allocated, parsedProj, ErrProjectQuotaExceeded, "project"); err != nil {
+			return err
+		}
+
+		return upsert(tx, &saved, []string{"project_id", "code_az"}, "resources")
+	})
+	if err != nil {
+		return nil, err
+	}
+	return &saved, nil
+}
+
+// DeleteOrganizationQuota removes an organization quota (platform administrators only).
+// The project quotas are kept and keep being enforced.
 func DeleteOrganizationQuota(ctx context.Context, orgId uuid.UUID) error {
-	return db.Client.WithContext(ctx).Where("organization_id = ?", orgId).Delete(&model.OrganizationQuota{}).Error
+	return db.Client.WithContext(ctx).Unscoped().Where("organization_id = ?", orgId).Delete(&model.OrganizationQuota{}).Error
 }
 
-// DeleteProjectQuota deletes a project quota.
-func DeleteProjectQuota(ctx context.Context, projectId uuid.UUID) error {
-	return db.Client.WithContext(ctx).Where("project_id = ?", projectId).Delete(&model.ProjectQuota{}).Error
+// DeleteProjectQuota removes the quota of a project of the organization and its AZ quotas.
+// It is refused while the organization has a quota, since the project would escape it.
+func DeleteProjectQuota(ctx context.Context, orgId, projectId uuid.UUID) error {
+	return db.Client.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
+		if err := lockOrganization(tx, orgId); err != nil {
+			return err
+		}
+		if err := checkProject(tx, orgId, projectId); err != nil {
+			return err
+		}
+		oq, err := findOrganizationQuota(tx, orgId)
+		if err != nil {
+			return err
+		}
+		if oq != nil {
+			return ErrProjectQuotaEnforced
+		}
+		if err := tx.Unscoped().Where("project_id = ?", projectId).Delete(&model.ProjectAZQuota{}).Error; err != nil {
+			return err
+		}
+		return tx.Unscoped().Where("project_id = ?", projectId).Delete(&model.ProjectQuota{}).Error
+	})
 }
 
-// DeleteProjectAZQuota deletes an AZ quota.
-func DeleteProjectAZQuota(ctx context.Context, projectId uuid.UUID, codeAZ string) error {
-	return db.Client.WithContext(ctx).Where("project_id = ? AND code_az = ?", projectId, codeAZ).Delete(&model.ProjectAZQuota{}).Error
+// checkWithin checks that requested only limits resources of limit, and that
+// allocated + requested fits in limit.
+func checkWithin(requested, allocated, limit spxQuota.Quantities, errExceeded error, level string) error {
+	if names := requested.NotIn(limit); len(names) > 0 {
+		return fmt.Errorf("%w: %s not limited by the %s quota", errExceeded, strings.Join(names, ", "), level)
+	}
+	if msg, exceeded := allocated.Add(requested).Exceeds(limit); exceeded {
+		return fmt.Errorf("%w: %s", errExceeded, msg)
+	}
+	return nil
+}
+
+// saveProjectQuota writes a project quota (parsed being its parsed form), then splits it
+// equally among the AZs of the organization, overwriting the previous AZ quotas.
+func saveProjectQuota(tx *gorm.DB, orgId, projectId uuid.UUID, resources model.QuotaResources, parsed spxQuota.Quantities) (model.ProjectQuota, error) {
+	pq := model.ProjectQuota{ProjectId: projectId, OrganizationId: orgId, Resources: resources}
+	if err := upsert(tx, &pq, []string{"project_id"}, "organization_id", "resources"); err != nil {
+		return pq, err
+	}
+
+	azs := az.FindAll(orgId.String())
+	slices.SortFunc(azs, func(a, b config.AZConfig) int { return strings.Compare(a.Code, b.Code) })
+	share := parsed.SplitEqually(len(azs)).Resources()
+	for _, azCfg := range azs {
+		azq := model.ProjectAZQuota{ProjectId: projectId, CodeAZ: azCfg.Code, Resources: share}
+		if err := upsert(tx, &azq, []string{"project_id", "code_az"}, "resources"); err != nil {
+			return pq, err
+		}
+	}
+	return pq, nil
+}
+
+// upsert inserts row, or updates the given columns when a row with the same conflict
+// columns exists. A soft-deleted row is revived.
+func upsert(tx *gorm.DB, row any, conflict []string, update ...string) error {
+	columns := make([]clause.Column, len(conflict))
+	for i, c := range conflict {
+		columns[i] = clause.Column{Name: c}
+	}
+	return tx.Clauses(clause.OnConflict{
+		Columns:   columns,
+		DoUpdates: clause.AssignmentColumns(append(update, "updated_at", "deleted_at")),
+	}).Create(row).Error
+}
+
+// lockOrganization takes a row lock on the organization, serializing the quota writes of an
+// organization so that concurrent requests cannot both pass the same capacity check.
+func lockOrganization(tx *gorm.DB, orgId uuid.UUID) error {
+	err := tx.Clauses(clause.Locking{Strength: clause.LockingStrengthUpdate}).
+		Select("id").Where("id = ?", orgId).Take(&model.Organization{}).Error
+	if errors.Is(err, gorm.ErrRecordNotFound) {
+		return ErrOrganizationNotFound
+	}
+	return err
+}
+
+// checkProject ensures the project exists and belongs to the organization.
+func checkProject(tx *gorm.DB, orgId, projectId uuid.UUID) error {
+	err := tx.Select("id").Where("id = ? AND orga_id = ?", projectId, orgId).Take(&model.Project{}).Error
+	if errors.Is(err, gorm.ErrRecordNotFound) {
+		return ErrProjectNotFound
+	}
+	return err
+}
+
+func findOrganizationQuota(tx *gorm.DB, orgId uuid.UUID) (*model.OrganizationQuota, error) {
+	var oq model.OrganizationQuota
+	return orNil(&oq, tx.Where("organization_id = ?", orgId).Take(&oq).Error)
+}
+
+func findProjectQuota(tx *gorm.DB, projectId uuid.UUID) (*model.ProjectQuota, error) {
+	var pq model.ProjectQuota
+	return orNil(&pq, tx.Where("project_id = ?", projectId).Take(&pq).Error)
+}
+
+func orNil[T any](row *T, err error) (*T, error) {
+	if errors.Is(err, gorm.ErrRecordNotFound) {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, err
+	}
+	return row, nil
+}
+
+// listProjectQuotas lists the quotas of the live projects of the organization. Quotas of
+// deleted projects are ignored, so they do not keep consuming the organization quota.
+func listProjectQuotas(tx *gorm.DB, orgId uuid.UUID) ([]model.ProjectQuota, error) {
+	var pqs []model.ProjectQuota
+	err := tx.Where("organization_id = ? AND project_id IN (?)", orgId,
+		tx.Session(&gorm.Session{NewDB: true}).Model(&model.Project{}).Select("id").Where("orga_id = ?", orgId)).
+		Order("project_id").Find(&pqs).Error
+	return pqs, err
+}
+
+func sumProjectQuotas(pqs []model.ProjectQuota) (spxQuota.Quantities, error) {
+	total := spxQuota.Quantities{}
+	for _, pq := range pqs {
+		parsed, err := pq.Resources.Parse()
+		if err != nil {
+			return nil, err
+		}
+		total = total.Add(parsed)
+	}
+	return total, nil
 }

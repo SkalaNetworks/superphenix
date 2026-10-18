@@ -13,6 +13,7 @@ const (
 	OrganizationAuditLogRead      = "OrganizationAuditLogRead"
 	OrganizationAuditLogWrite     = "OrganizationAuditLogWrite"
 	OrganizationProjectManagement = "OrganizationProjectManagement"
+	OrganizationProjectQuotaWrite = "OrganizationProjectQuotaWrite"
 	ProjectRead                   = "ProjectRead"
 
 	ProjectInstanceRead     = "ProjectInstanceRead"
@@ -55,6 +56,8 @@ const (
 	ProjectBucketCredentials = "ProjectBucketCredentials"
 	ProjectBucketWrite       = "ProjectBucketWrite"
 
+	ProjectAZQuotaWrite = "ProjectAZQuotaWrite"
+
 	ProjectArgoCdRead = "ProjectArgoCdRead"
 )
 
@@ -69,6 +72,7 @@ var PermissionsEntityMap = map[string]string{
 	OrganizationAuditLogRead:      entity.Organization,
 	OrganizationAuditLogWrite:     entity.Organization,
 	OrganizationProjectManagement: entity.Organization,
+	OrganizationProjectQuotaWrite: entity.Organization,
 	ProjectRead:                   entity.Project,
 
 	ProjectInstanceRead:     entity.Project,
@@ -106,6 +110,8 @@ var PermissionsEntityMap = map[string]string{
 	ProjectBucketRead:        entity.Project,
 	ProjectBucketCredentials: entity.Project,
 	ProjectBucketWrite:       entity.Project,
+
+	ProjectAZQuotaWrite: entity.Project,
 
 	ProjectArgoCdRead: entity.Project,
 }

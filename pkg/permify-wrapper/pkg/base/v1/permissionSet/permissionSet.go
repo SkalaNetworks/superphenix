@@ -10,16 +10,17 @@ const InternalPrefix = "spx_"
 
 // PermissionSets
 const (
-	SpxOwner           = "spx_owner"
-	SpxMember          = "spx_member"
-	IAMFullAccess      = "IAMFullAccess"
-	IAMReadOnly        = "IAMReadOnly"
-	BillingFullAccess  = "BillingFullAccess"
-	BillingReadOnly    = "BillingReadOnly"
-	AuditLogFullAccess = "AuditLogFullAccess"
-	AuditLogReadOnly   = "AuditLogReadOnly"
-	ProjectManagement  = "ProjectManagement"
-	SettingsEdition    = "SettingsEdition"
+	SpxOwner               = "spx_owner"
+	SpxMember              = "spx_member"
+	IAMFullAccess          = "IAMFullAccess"
+	IAMReadOnly            = "IAMReadOnly"
+	BillingFullAccess      = "BillingFullAccess"
+	BillingReadOnly        = "BillingReadOnly"
+	AuditLogFullAccess     = "AuditLogFullAccess"
+	AuditLogReadOnly       = "AuditLogReadOnly"
+	ProjectManagement      = "ProjectManagement"
+	ProjectQuotaFullAccess = "ProjectQuotaFullAccess"
+	SettingsEdition        = "SettingsEdition"
 
 	ProjectInstanceFullAccess     = "ProjectInstanceFullAccess"
 	ProjectInstanceTerminalAccess = "ProjectInstanceTerminalAccess"
@@ -54,23 +55,27 @@ const (
 
 	ProjectBucketFullAccess        = "ProjectBucketFullAccess"
 	ProjectBucketCredentialsAccess = "ProjectBucketCredentialsAccess"
+	ProjectBucketWrite             = "ProjectBucketWrite"
 	ProjectBucketReadOnly          = "ProjectBucketReadOnly"
+
+	ProjectAZQuotaFullAccess = "ProjectAZQuotaFullAccess"
 
 	ProjectArgoCdAccess = "ProjectArgoCdAccess"
 )
 
 // PermissionSetsEntityMap is the association between PermissionSet and Permify Entity
 var PermissionSetsEntityMap = map[string]string{
-	SpxOwner:           entity.Organization,
-	SpxMember:          entity.Organization,
-	IAMFullAccess:      entity.Organization,
-	IAMReadOnly:        entity.Organization,
-	SettingsEdition:    entity.Organization,
-	BillingFullAccess:  entity.Organization,
-	BillingReadOnly:    entity.Organization,
-	AuditLogFullAccess: entity.Organization,
-	AuditLogReadOnly:   entity.Organization,
-	ProjectManagement:  entity.Organization,
+	SpxOwner:               entity.Organization,
+	SpxMember:              entity.Organization,
+	IAMFullAccess:          entity.Organization,
+	IAMReadOnly:            entity.Organization,
+	SettingsEdition:        entity.Organization,
+	BillingFullAccess:      entity.Organization,
+	BillingReadOnly:        entity.Organization,
+	AuditLogFullAccess:     entity.Organization,
+	AuditLogReadOnly:       entity.Organization,
+	ProjectManagement:      entity.Organization,
+	ProjectQuotaFullAccess: entity.Organization,
 
 	ProjectInstanceFullAccess:     entity.Project,
 	ProjectInstanceTerminalAccess: entity.Project,
@@ -110,6 +115,8 @@ var PermissionSetsEntityMap = map[string]string{
 	ProjectBucketFullAccess:        entity.Project,
 	ProjectBucketCredentialsAccess: entity.Project,
 	ProjectBucketReadOnly:          entity.Project,
+
+	ProjectAZQuotaFullAccess: entity.Project,
 
 	ProjectArgoCdAccess: entity.Project,
 }

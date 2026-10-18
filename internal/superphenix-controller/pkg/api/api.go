@@ -102,6 +102,7 @@ func LaunchEndpoint(address string) {
 
 		//// OTHERS ////
 		k8s.SSHEndpoint(r)
+		k8s.QuotaEndpoint(r)
 	})
 
 	// Webhook Server

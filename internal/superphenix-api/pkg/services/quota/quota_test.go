@@ -1,11 +1,12 @@
 package quota
 
 import (
-	"bytes"
-	"encoding/json"
+	"errors"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"regexp"
+	"strings"
 	"testing"
 
 	"github.com/DATA-DOG/go-sqlmock"
@@ -17,171 +18,123 @@ import (
 	"gorm.io/gorm"
 
 	"github.com/super-phenix/superphenix/internal/superphenix-api/internal/db"
-	"github.com/super-phenix/superphenix/internal/superphenix-api/internal/db/model"
+	crudQuota "github.com/super-phenix/superphenix/internal/superphenix-api/internal/db/crud/quota"
 	"github.com/super-phenix/superphenix/internal/superphenix-api/pkg/config"
 )
 
-func setupMockDB(t *testing.T) (sqlmock.Sqlmock, func()) {
+func setupMockDB(t *testing.T) sqlmock.Sqlmock {
 	t.Helper()
 	sqlDB, mock, err := sqlmock.New()
-	if err != nil {
-		t.Fatalf("failed to create sqlmock: %v", err)
-	}
+	require.NoError(t, err)
 
-	gormDB, err := gorm.Open(postgres.New(postgres.Config{
-		Conn: sqlDB,
-	}), &gorm.Config{})
-	if err != nil {
-		t.Fatalf("failed to open gorm: %v", err)
-	}
+	gormDB, err := gorm.Open(postgres.New(postgres.Config{Conn: sqlDB}), &gorm.Config{})
+	require.NoError(t, err)
 
 	oldClient := db.Client
 	db.Client = gormDB
-	return mock, func() {
+	t.Cleanup(func() {
+		assert.NoError(t, mock.ExpectationsWereMet())
 		db.Client = oldClient
 		_ = sqlDB.Close()
-	}
-}
-
-func TestGetOrganizationQuota(t *testing.T) {
-	orgID := uuid.New()
-
-	t.Run("success returns quota and project allocations", func(t *testing.T) {
-		mock, cleanup := setupMockDB(t)
-		defer cleanup()
-
-		mock.ExpectQuery(regexp.QuoteMeta(`SELECT * FROM "organization_quotas" WHERE organization_id = $1 AND "organization_quotas"."deleted_at" IS NULL ORDER BY "organization_quotas"."organization_id" LIMIT $2`)).
-			WithArgs(orgID, 1).
-			WillReturnRows(sqlmock.NewRows([]string{"organization_id", "resources"}).
-				AddRow(orgID, `{"cpu":"64","memory":"256Gi","disk":"2Ti"}`))
-
-		proj1 := uuid.New()
-		mock.ExpectQuery(regexp.QuoteMeta(`SELECT * FROM "project_quotas" WHERE organization_id = $1 AND "project_quotas"."deleted_at" IS NULL`)).
-			WithArgs(orgID).
-			WillReturnRows(sqlmock.NewRows([]string{"project_id", "organization_id", "resources"}).
-				AddRow(proj1, orgID, `{"cpu":"32","memory":"128Gi","disk":"1Ti"}`))
-
-		r := chi.NewRouter()
-		svc := New(&config.Global)
-		r.Get("/organization/{orgaId}/quota", svc.GetOrganizationQuota)
-
-		req := httptest.NewRequest(http.MethodGet, "/organization/"+orgID.String()+"/quota", nil)
-		rr := httptest.NewRecorder()
-		r.ServeHTTP(rr, req)
-
-		assert.Equal(t, http.StatusOK, rr.Code)
-		var resp OrganizationQuotaOverview
-		err := json.Unmarshal(rr.Body.Bytes(), &resp)
-		require.NoError(t, err)
-		assert.False(t, resp.Unlimited)
-		assert.Equal(t, "64", resp.Resources.CPU)
-		assert.Equal(t, "32", resp.Allocated.CPU)
-		assert.Equal(t, "32", resp.Remaining.CPU)
-		assert.Len(t, resp.ProjectQuotas, 1)
 	})
+	return mock
 }
 
-func TestGetProjectQuota(t *testing.T) {
-	orgID := uuid.New()
-	projID := uuid.New()
-
-	mock, cleanup := setupMockDB(t)
-	defer cleanup()
-
-	mock.ExpectQuery(regexp.QuoteMeta(`SELECT * FROM "project_quotas" WHERE project_id = $1 AND "project_quotas"."deleted_at" IS NULL ORDER BY "project_quotas"."project_id" LIMIT $2`)).
-		WithArgs(projID, 1).
-		WillReturnRows(sqlmock.NewRows([]string{"project_id", "organization_id", "resources"}).
-			AddRow(projID, orgID, `{"cpu":"32","memory":"128Gi","disk":"1Ti"}`))
-
-	mock.ExpectQuery(regexp.QuoteMeta(`SELECT * FROM "project_az_quotas" WHERE project_id = $1 AND "project_az_quotas"."deleted_at" IS NULL`)).
-		WithArgs(projID).
-		WillReturnRows(sqlmock.NewRows([]string{"id", "project_id", "code_az", "resources"}).
-			AddRow(uuid.New(), projID, "az-1", `{"cpu":"16","memory":"64Gi","disk":"500Gi"}`))
-
-	r := chi.NewRouter()
+func newRouter() chi.Router {
 	svc := New(&config.Global)
+	r := chi.NewRouter()
+	r.Get("/organization/{orgaId}/quota", svc.GetOrganizationQuota)
 	r.Get("/organization/{orgaId}/project/{projectId}/quota", svc.GetProjectQuota)
-
-	req := httptest.NewRequest(http.MethodGet, "/organization/"+orgID.String()+"/project/"+projID.String()+"/quota", nil)
-	rr := httptest.NewRecorder()
-	r.ServeHTTP(rr, req)
-
-	assert.Equal(t, http.StatusOK, rr.Code)
-	var resp ProjectQuotaOverview
-	err := json.Unmarshal(rr.Body.Bytes(), &resp)
-	require.NoError(t, err)
-	assert.Equal(t, "32", resp.Resources.CPU)
-	assert.Len(t, resp.AZQuotas, 1)
+	r.Put("/organization/{orgaId}/project/{projectId}/quota", svc.SetProjectQuota)
+	r.Put("/organization/{orgaId}/project/{projectId}/quota/az/{codeAZ}", svc.SetProjectAZQuota)
+	r.Delete("/organization/{orgaId}/project/{projectId}/quota", svc.DeleteProjectQuota)
+	return r
 }
 
-func TestSetProjectQuota(t *testing.T) {
-	orgID := uuid.New()
-	projID := uuid.New()
+func do(r chi.Router, method, path, body string) *httptest.ResponseRecorder {
+	req := httptest.NewRequest(method, path, strings.NewReader(body))
+	if body != "" {
+		req.Header.Set("Content-Type", "application/json")
+	}
+	rr := httptest.NewRecorder()
+	r.ServeHTTP(rr, req)
+	return rr
+}
 
-	config.Global.AZs = map[string]config.AZConfig{
-		"az-1": {Code: "az-1"},
+func TestSetProjectQuotaRequestValidation(t *testing.T) {
+	path := fmt.Sprintf("/organization/%s/project/%s/quota", uuid.New(), uuid.New())
+
+	tests := map[string]struct {
+		path   string
+		body   string
+		status int
+	}{
+		"invalid organization id": {path: "/organization/x/project/" + uuid.NewString() + "/quota", body: `{}`, status: http.StatusBadRequest},
+		"invalid project id":      {path: "/organization/" + uuid.NewString() + "/project/x/quota", body: `{}`, status: http.StatusBadRequest},
+		"malformed body":          {path: path, body: `{"cpu":`, status: http.StatusBadRequest},
+		"non string quantity":     {path: path, body: `{"cpu":16}`, status: http.StatusBadRequest},
+		"invalid quantity":        {path: path, body: `{"cpu":"lots"}`, status: http.StatusBadRequest},
+		"translated key":          {path: path, body: `{"limits.cpu":"16"}`, status: http.StatusBadRequest},
+		"invalid resource name":   {path: path, body: `{"pods: 1\nfoo":"16"}`, status: http.StatusBadRequest},
+		"body too large":          {path: path, body: `{"cpu":"` + strings.Repeat("1", 2<<20) + `"}`, status: http.StatusRequestEntityTooLarge},
+	}
+	for name, tt := range tests {
+		t.Run(name, func(t *testing.T) {
+			setupMockDB(t) // no query is expected
+			rr := do(newRouter(), http.MethodPut, tt.path, tt.body)
+			assert.Equal(t, tt.status, rr.Code, rr.Body.String())
+		})
+	}
+}
+
+func TestSetProjectQuotaOfAnotherOrganization(t *testing.T) {
+	orgID, projID := uuid.New(), uuid.New()
+	mock := setupMockDB(t)
+
+	mock.ExpectBegin()
+	mock.ExpectQuery(regexp.QuoteMeta(`FROM "organizations"`)).WillReturnRows(sqlmock.NewRows([]string{"id"}).AddRow(orgID))
+	mock.ExpectQuery(regexp.QuoteMeta(`SELECT "id" FROM "projects" WHERE (id = $1 AND orga_id = $2)`)).
+		WithArgs(projID, orgID, 1).WillReturnError(gorm.ErrRecordNotFound)
+	mock.ExpectRollback()
+
+	rr := do(newRouter(), http.MethodPut, fmt.Sprintf("/organization/%s/project/%s/quota", orgID, projID), `{"cpu":"1"}`)
+	assert.Equal(t, http.StatusNotFound, rr.Code)
+}
+
+func TestGetProjectQuotaOfAnotherOrganization(t *testing.T) {
+	orgID, projID := uuid.New(), uuid.New()
+	mock := setupMockDB(t)
+
+	mock.ExpectQuery(regexp.QuoteMeta(`SELECT "id" FROM "projects" WHERE (id = $1 AND orga_id = $2)`)).
+		WithArgs(projID, orgID, 1).WillReturnError(gorm.ErrRecordNotFound)
+
+	rr := do(newRouter(), http.MethodGet, fmt.Sprintf("/organization/%s/project/%s/quota", orgID, projID), "")
+	assert.Equal(t, http.StatusNotFound, rr.Code)
+}
+
+func TestWriteError(t *testing.T) {
+	tests := map[error]int{
+		fmt.Errorf("%w: cpu", crudQuota.ErrInvalidQuantity):      http.StatusBadRequest,
+		fmt.Errorf("%w: cpu", crudQuota.ErrOrgQuotaExceeded):     http.StatusBadRequest,
+		fmt.Errorf("%w: cpu", crudQuota.ErrProjectQuotaExceeded): http.StatusBadRequest,
+		crudQuota.ErrOrganizationNotFound:                        http.StatusNotFound,
+		crudQuota.ErrProjectNotFound:                             http.StatusNotFound,
+		crudQuota.ErrAZNotFound:                                  http.StatusNotFound,
+		crudQuota.ErrProjectQuotaRequired:                        http.StatusConflict,
+		crudQuota.ErrProjectQuotaEnforced:                        http.StatusConflict,
+	}
+	for err, status := range tests {
+		rr := httptest.NewRecorder()
+		WriteError(rr, httptest.NewRequest(http.MethodGet, "/", nil), err, "generic")
+		assert.Equal(t, status, rr.Code, err.Error())
+		assert.Contains(t, rr.Body.String(), err.Error())
 	}
 
-	mock, cleanup := setupMockDB(t)
-	defer cleanup()
-
-	mock.ExpectBegin()
-	mock.ExpectQuery(regexp.QuoteMeta(`SELECT * FROM "organization_quotas" WHERE organization_id = $1 AND "organization_quotas"."deleted_at" IS NULL ORDER BY "organization_quotas"."organization_id" LIMIT $2`)).
-		WithArgs(orgID, 1).
-		WillReturnError(gorm.ErrRecordNotFound) // unlimited org
-
-	mock.ExpectQuery(regexp.QuoteMeta(`SELECT * FROM "project_quotas" WHERE project_id = $1 AND "project_quotas"."deleted_at" IS NULL ORDER BY "project_quotas"."project_id" LIMIT $2`)).
-		WithArgs(projID, 1).
-		WillReturnError(gorm.ErrRecordNotFound)
-
-	mock.ExpectExec(regexp.QuoteMeta(`INSERT INTO "project_quotas"`)).
-		WillReturnResult(sqlmock.NewResult(1, 1))
-
-	mock.ExpectQuery(regexp.QuoteMeta(`SELECT * FROM "project_az_quotas" WHERE (project_id = $1 AND code_az = $2) AND "project_az_quotas"."deleted_at" IS NULL`)).
-		WithArgs(projID, "az-1", 1).
-		WillReturnError(gorm.ErrRecordNotFound)
-
-	mock.ExpectQuery(regexp.QuoteMeta(`INSERT INTO "project_az_quotas"`)).
-		WillReturnRows(sqlmock.NewRows([]string{"id"}).AddRow(uuid.New()))
-
-	mock.ExpectCommit()
-
-	r := chi.NewRouter()
-	svc := New(&config.Global)
-	r.Put("/organization/{orgaId}/project/{projectId}/quota", svc.SetProjectQuota)
-
-	body, _ := json.Marshal(model.QuotaResources{
-		CPU:    "16",
-		Memory: "64Gi",
-		Disk:   "1Ti",
+	t.Run("internal errors are not leaked", func(t *testing.T) {
+		rr := httptest.NewRecorder()
+		WriteError(rr, httptest.NewRequest(http.MethodGet, "/", nil), errors.New(`pq: relation "secret_table" does not exist`), "generic")
+		assert.Equal(t, http.StatusInternalServerError, rr.Code)
+		assert.NotContains(t, rr.Body.String(), "secret_table")
+		assert.Contains(t, rr.Body.String(), "generic")
 	})
-	req := httptest.NewRequest(http.MethodPut, "/organization/"+orgID.String()+"/project/"+projID.String()+"/quota", bytes.NewReader(body))
-	rr := httptest.NewRecorder()
-	r.ServeHTTP(rr, req)
-
-	assert.Equal(t, http.StatusOK, rr.Code)
-}
-
-func TestDeleteProjectQuota(t *testing.T) {
-	orgID := uuid.New()
-	projID := uuid.New()
-
-	mock, cleanup := setupMockDB(t)
-	defer cleanup()
-
-	mock.ExpectBegin()
-	mock.ExpectExec(regexp.QuoteMeta(`UPDATE "project_quotas" SET "deleted_at"=$1 WHERE project_id = $2 AND "project_quotas"."deleted_at" IS NULL`)).
-		WithArgs(sqlmock.AnyArg(), projID).
-		WillReturnResult(sqlmock.NewResult(1, 1))
-	mock.ExpectCommit()
-
-	r := chi.NewRouter()
-	svc := New(&config.Global)
-	r.Delete("/organization/{orgaId}/project/{projectId}/quota", svc.DeleteProjectQuota)
-
-	req := httptest.NewRequest(http.MethodDelete, "/organization/"+orgID.String()+"/project/"+projID.String()+"/quota", nil)
-	rr := httptest.NewRecorder()
-	r.ServeHTTP(rr, req)
-
-	assert.Equal(t, http.StatusNoContent, rr.Code)
 }

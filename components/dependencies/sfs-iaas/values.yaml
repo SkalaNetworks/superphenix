@@ -44,17 +44,15 @@ deviceMapping: {}
 # @section -- Organization parameters
 bgpSpeaker: ""
 
-# -- Quota configuration for this project in this AZ.
+# -- Optional ResourceQuota of the project namespace: every entry is rendered as is in `spec.hard`.
+# No ResourceQuota is rendered when empty. The quotas managed through the Superphenix API are
+# enforced by the superphenix-controller of each AZ (ResourceQuota `spx-quota`), independently of this chart.
 # @section -- Quotas
-quota:
-  requests.cpu: ""
-  limits.cpu: ""
-  requests.memory: ""
-  limits.memory: ""
-  requests.storage: ""
-  pods: "50"
-  persistentvolumeclaims: "50"
-  count/virtualmachines.kubevirt.io: "20"
+quota: {}
+  # requests.cpu: "16"
+  # limits.memory: "64Gi"
+  # pods: "50"
+  # count/virtualmachines.kubevirt.io: "20"
 
 # @section -- Global overrides
 global:

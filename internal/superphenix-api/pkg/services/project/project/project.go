@@ -9,6 +9,7 @@ import (
 	"github.com/super-phenix/superphenix/internal/superphenix-api/internal/db/crud/group"
 	"github.com/super-phenix/superphenix/internal/superphenix-api/internal/db/crud/product"
 	"github.com/super-phenix/superphenix/internal/superphenix-api/internal/db/crud/project"
+	"github.com/super-phenix/superphenix/internal/superphenix-api/internal/quotasync"
 	"github.com/super-phenix/superphenix/internal/superphenix-api/internal/utils"
 	"github.com/super-phenix/superphenix/internal/superphenix-api/pkg/api/publicHttp/gc"
 	"github.com/super-phenix/superphenix/internal/superphenix-api/pkg/api/publicHttp/model"
@@ -232,6 +233,12 @@ func InitializeProject(ctx context.Context, userId, orgaId uuid.UUID, name strin
 	if err != nil {
 		log.Err(err).Str("userId", userId.String()).Any("project", projectEntity).Msg("Failed to initialize project permission")
 		return model.APIProject{}, err
+	}
+
+	// A project created in an organization with a quota gets 0 for every limited
+	// resource, until a project quota is given to it.
+	if err := quotasync.Project(ctx, orgaId, projectEntity.ID); err != nil {
+		log.Err(err).Str("userId", userId.String()).Any("project", projectEntity).Msg("Failed to apply project quota")
 	}
 
 	if config.Global.UserSettings.EnableProjectDefaultResources {

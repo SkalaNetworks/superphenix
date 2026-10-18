@@ -63,6 +63,15 @@ rules:
   - apiGroups:
       - ""
     resources:
+      - resourcequotas
+    verbs:
+      - create
+      - update
+      - get
+      - delete
+  - apiGroups:
+      - ""
+    resources:
       - pods
     verbs:
       - update

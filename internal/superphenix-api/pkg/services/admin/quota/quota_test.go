@@ -1,11 +1,11 @@
 package quota
 
 import (
-	"bytes"
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
 	"regexp"
+	"strings"
 	"testing"
 
 	"github.com/DATA-DOG/go-sqlmock"
@@ -17,129 +17,135 @@ import (
 	"gorm.io/gorm"
 
 	"github.com/super-phenix/superphenix/internal/superphenix-api/internal/db"
-	"github.com/super-phenix/superphenix/internal/superphenix-api/internal/db/model"
+	crudQuota "github.com/super-phenix/superphenix/internal/superphenix-api/internal/db/crud/quota"
 	"github.com/super-phenix/superphenix/internal/superphenix-api/pkg/config"
 )
 
-func setupMockDB(t *testing.T) (sqlmock.Sqlmock, func()) {
+func setupMockDB(t *testing.T) sqlmock.Sqlmock {
 	t.Helper()
 	sqlDB, mock, err := sqlmock.New()
-	if err != nil {
-		t.Fatalf("failed to create sqlmock: %v", err)
-	}
+	require.NoError(t, err)
 
-	gormDB, err := gorm.Open(postgres.New(postgres.Config{
-		Conn: sqlDB,
-	}), &gorm.Config{})
-	if err != nil {
-		t.Fatalf("failed to open gorm: %v", err)
-	}
+	gormDB, err := gorm.Open(postgres.New(postgres.Config{Conn: sqlDB}), &gorm.Config{})
+	require.NoError(t, err)
 
 	oldClient := db.Client
 	db.Client = gormDB
-	return mock, func() {
+	t.Cleanup(func() {
+		assert.NoError(t, mock.ExpectationsWereMet())
 		db.Client = oldClient
 		_ = sqlDB.Close()
-	}
+	})
+	return mock
+}
+
+func newRouter() chi.Router {
+	svc := New(&config.Global)
+	r := chi.NewRouter()
+	r.Get("/organization/{orgaId}", svc.GetOrganizationQuota)
+	r.Put("/organization/{orgaId}", svc.SetOrganizationQuota)
+	r.Delete("/organization/{orgaId}", svc.DeleteOrganizationQuota)
+	return r
 }
 
 func TestAdminGetOrganizationQuota(t *testing.T) {
 	orgID := uuid.New()
+	mock := setupMockDB(t)
 
-	t.Run("success returns org quota and project allocations", func(t *testing.T) {
-		mock, cleanup := setupMockDB(t)
-		defer cleanup()
+	mock.ExpectQuery(regexp.QuoteMeta(`SELECT * FROM "organization_quotas"`)).
+		WillReturnRows(sqlmock.NewRows([]string{"organization_id", "resources"}).AddRow(orgID, `{"cpu":"64"}`))
+	mock.ExpectQuery(regexp.QuoteMeta(`SELECT * FROM "project_quotas"`)).
+		WillReturnRows(sqlmock.NewRows([]string{"project_id", "organization_id", "resources"}).AddRow(uuid.New(), orgID, `{"cpu":"16"}`))
 
-		mock.ExpectQuery(regexp.QuoteMeta(`SELECT * FROM "organization_quotas" WHERE organization_id = $1 AND "organization_quotas"."deleted_at" IS NULL ORDER BY "organization_quotas"."organization_id" LIMIT $2`)).
-			WithArgs(orgID, 1).
-			WillReturnRows(sqlmock.NewRows([]string{"organization_id", "resources"}).
-				AddRow(orgID, `{"cpu":"64","memory":"256Gi","disk":"2Ti"}`))
+	rr := httptest.NewRecorder()
+	newRouter().ServeHTTP(rr, httptest.NewRequest(http.MethodGet, "/organization/"+orgID.String(), nil))
 
-		proj1 := uuid.New()
-		mock.ExpectQuery(regexp.QuoteMeta(`SELECT * FROM "project_quotas" WHERE organization_id = $1 AND "project_quotas"."deleted_at" IS NULL`)).
-			WithArgs(orgID).
-			WillReturnRows(sqlmock.NewRows([]string{"project_id", "organization_id", "resources"}).
-				AddRow(proj1, orgID, `{"cpu":"32","memory":"128Gi","disk":"1Ti"}`))
-
-		r := chi.NewRouter()
-		svc := New(&config.Global)
-		r.Get("/quota/organization/{orgaId}", svc.GetOrganizationQuota)
-
-		req := httptest.NewRequest(http.MethodGet, "/quota/organization/"+orgID.String(), nil)
-		rr := httptest.NewRecorder()
-		r.ServeHTTP(rr, req)
-
-		assert.Equal(t, http.StatusOK, rr.Code)
-		var resp AdminOrganizationQuotaResponse
-		err := json.Unmarshal(rr.Body.Bytes(), &resp)
-		require.NoError(t, err)
-		assert.False(t, resp.Unlimited)
-		assert.Equal(t, "64", resp.Resources.CPU)
-		assert.Equal(t, "32", resp.Allocated.CPU)
-		assert.Equal(t, "32", resp.Remaining.CPU)
-		assert.Len(t, resp.ProjectQuotas, 1)
-	})
+	require.Equal(t, http.StatusOK, rr.Code)
+	var resp crudQuota.OrganizationQuotaOverview
+	require.NoError(t, json.Unmarshal(rr.Body.Bytes(), &resp))
+	assert.False(t, resp.Unlimited)
+	assert.Equal(t, "16", resp.Allocated["cpu"])
+	assert.Equal(t, "48", resp.Remaining["cpu"])
 }
 
 func TestAdminSetOrganizationQuota(t *testing.T) {
 	orgID := uuid.New()
 
-	mock, cleanup := setupMockDB(t)
-	defer cleanup()
+	t.Run("unknown organization", func(t *testing.T) {
+		mock := setupMockDB(t)
+		mock.ExpectBegin()
+		mock.ExpectQuery(regexp.QuoteMeta(`FROM "organizations"`)).WillReturnError(gorm.ErrRecordNotFound)
+		mock.ExpectRollback()
 
-	mock.ExpectBegin()
-	mock.ExpectQuery(regexp.QuoteMeta(`SELECT * FROM "projects" WHERE orga_id = $1 AND "projects"."deleted_at" IS NULL`)).
-		WithArgs(orgID).
-		WillReturnRows(sqlmock.NewRows([]string{"id", "orga_id", "name"}))
-
-	mock.ExpectQuery(regexp.QuoteMeta(`SELECT * FROM "project_quotas" WHERE organization_id = $1 AND "project_quotas"."deleted_at" IS NULL`)).
-		WithArgs(orgID).
-		WillReturnRows(sqlmock.NewRows([]string{"project_id", "organization_id", "resources"}))
-
-	mock.ExpectQuery(regexp.QuoteMeta(`SELECT * FROM "organization_quotas" WHERE organization_id = $1 AND "organization_quotas"."deleted_at" IS NULL ORDER BY "organization_quotas"."organization_id" LIMIT $2`)).
-		WithArgs(orgID, 1).
-		WillReturnError(gorm.ErrRecordNotFound)
-
-	mock.ExpectExec(regexp.QuoteMeta(`INSERT INTO "organization_quotas"`)).
-		WillReturnResult(sqlmock.NewResult(1, 1))
-
-	mock.ExpectCommit()
-
-	r := chi.NewRouter()
-	svc := New(&config.Global)
-	r.Put("/quota/organization/{orgaId}", svc.SetOrganizationQuota)
-
-	body, _ := json.Marshal(model.QuotaResources{
-		CPU:    "64",
-		Memory: "256Gi",
-		Disk:   "2Ti",
+		rr := httptest.NewRecorder()
+		newRouter().ServeHTTP(rr, httptest.NewRequest(http.MethodPut, "/organization/"+orgID.String(), strings.NewReader(`{"cpu":"64"}`)))
+		assert.Equal(t, http.StatusNotFound, rr.Code)
 	})
-	req := httptest.NewRequest(http.MethodPut, "/quota/organization/"+orgID.String(), bytes.NewReader(body))
-	rr := httptest.NewRecorder()
-	r.ServeHTTP(rr, req)
 
-	assert.Equal(t, http.StatusOK, rr.Code)
+	t.Run("invalid resources", func(t *testing.T) {
+		setupMockDB(t)
+		rr := httptest.NewRecorder()
+		newRouter().ServeHTTP(rr, httptest.NewRequest(http.MethodPut, "/organization/"+orgID.String(), strings.NewReader(`{"requests.memory":"1Gi"}`)))
+		assert.Equal(t, http.StatusBadRequest, rr.Code)
+	})
+}
+
+// fakeController records the quotas pushed to an AZ controller, answering status.
+func fakeController(t *testing.T, status int) map[string]map[string]string {
+	t.Helper()
+	pushed := map[string]map[string]string{}
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var body struct {
+			Hard map[string]string `json:"hard"`
+		}
+		_ = json.NewDecoder(r.Body).Decode(&body)
+		pushed[r.Method+" "+r.URL.Path] = body.Hard
+		w.WriteHeader(status)
+	}))
+	old := config.Global.AZs
+	config.Global.AZs = map[string]config.AZConfig{"az1": {Code: "az1", ControllerUrl: srv.URL}}
+	t.Cleanup(func() {
+		srv.Close()
+		config.Global.AZs = old
+	})
+	return pushed
+}
+
+func expectDeleteAndSync(mock sqlmock.Sqlmock, orgID, projectID uuid.UUID) {
+	mock.ExpectBegin()
+	mock.ExpectExec(regexp.QuoteMeta(`DELETE FROM "organization_quotas" WHERE organization_id = $1`)).
+		WithArgs(orgID).WillReturnResult(sqlmock.NewResult(0, 1))
+	mock.ExpectCommit()
+	mock.ExpectQuery(regexp.QuoteMeta(`SELECT "id" FROM "projects" WHERE orga_id = $1`)).
+		WillReturnRows(sqlmock.NewRows([]string{"id"}).AddRow(projectID))
+	mock.ExpectQuery(regexp.QuoteMeta(`SELECT * FROM "organization_quotas"`)).WillReturnRows(sqlmock.NewRows([]string{"organization_id"}))
+	mock.ExpectQuery(regexp.QuoteMeta(`SELECT * FROM "project_quotas"`)).
+		WillReturnRows(sqlmock.NewRows([]string{"project_id", "organization_id", "resources"}).AddRow(projectID, orgID, `{"cpu":"4","pods":"10"}`))
+	mock.ExpectQuery(regexp.QuoteMeta(`SELECT * FROM "project_az_quotas"`)).
+		WillReturnRows(sqlmock.NewRows([]string{"project_id", "code_az", "resources"}).AddRow(projectID, "az1", `{"cpu":"2"}`))
 }
 
 func TestAdminDeleteOrganizationQuota(t *testing.T) {
-	orgID := uuid.New()
+	orgID, projectID := uuid.New(), uuid.New()
 
-	mock, cleanup := setupMockDB(t)
-	defer cleanup()
+	t.Run("pushes the remaining project quota to the AZ controllers", func(t *testing.T) {
+		pushed := fakeController(t, http.StatusNoContent)
+		expectDeleteAndSync(setupMockDB(t), orgID, projectID)
 
-	mock.ExpectBegin()
-	mock.ExpectExec(regexp.QuoteMeta(`UPDATE "organization_quotas" SET "deleted_at"=$1 WHERE organization_id = $2 AND "organization_quotas"."deleted_at" IS NULL`)).
-		WithArgs(sqlmock.AnyArg(), orgID).
-		WillReturnResult(sqlmock.NewResult(1, 1))
-	mock.ExpectCommit()
+		rr := httptest.NewRecorder()
+		newRouter().ServeHTTP(rr, httptest.NewRequest(http.MethodDelete, "/organization/"+orgID.String(), nil))
+		assert.Equal(t, http.StatusNoContent, rr.Code)
+		// The project still limits pods, without AZ share: enforced at 0.
+		assert.Equal(t, map[string]string{"requests.cpu": "2", "limits.cpu": "2", "pods": "0"},
+			pushed["PUT /"+orgID.String()+"/"+projectID.String()+"/quota"])
+	})
 
-	r := chi.NewRouter()
-	svc := New(&config.Global)
-	r.Delete("/quota/organization/{orgaId}", svc.DeleteOrganizationQuota)
+	t.Run("controller failure", func(t *testing.T) {
+		fakeController(t, http.StatusInternalServerError)
+		expectDeleteAndSync(setupMockDB(t), orgID, projectID)
 
-	req := httptest.NewRequest(http.MethodDelete, "/quota/organization/"+orgID.String(), nil)
-	rr := httptest.NewRecorder()
-	r.ServeHTTP(rr, req)
-
-	assert.Equal(t, http.StatusNoContent, rr.Code)
+		rr := httptest.NewRecorder()
+		newRouter().ServeHTTP(rr, httptest.NewRequest(http.MethodDelete, "/organization/"+orgID.String(), nil))
+		assert.Equal(t, http.StatusBadGateway, rr.Code)
+	})
 }

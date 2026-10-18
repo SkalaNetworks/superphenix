@@ -18,7 +18,7 @@ const (
 
 // PredefinedCatalogVersion must be bumped on every change to PredefinedGroups or to
 // schema/schema_default.perm. Organizations below this version are re-synchronized.
-const PredefinedCatalogVersion = 2
+const PredefinedCatalogVersion = 3
 
 // Keys linking a persisted group to its catalog entry. Never user-visible, never change.
 const (
@@ -112,6 +112,7 @@ var (
 		permissionSet.BillingFullAccess,
 		permissionSet.AuditLogFullAccess,
 		permissionSet.ProjectManagement,
+		permissionSet.ProjectQuotaFullAccess,
 	}
 	DefaultProjectAdmin = []string{
 		permissionSet.ProjectInstanceFullAccess,
@@ -126,6 +127,7 @@ var (
 		permissionSet.ProjectKaaSFullAccess,
 		permissionSet.ProjectBaaSFullAccess,
 		permissionSet.ProjectBucketFullAccess,
+		permissionSet.ProjectAZQuotaFullAccess,
 		permissionSet.ProjectArgoCdAccess,
 	}
 

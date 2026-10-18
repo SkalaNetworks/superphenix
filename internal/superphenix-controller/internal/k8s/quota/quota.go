@@ -12,6 +12,7 @@ import (
 	"github.com/super-phenix/superphenix/internal/superphenix-controller/pkg/config"
 
 	spxId "github.com/super-phenix/superphenix/pkg/superphenix-id"
+	logger "github.com/super-phenix/superphenix/pkg/utils/log"
 
 	v1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
@@ -20,8 +21,12 @@ import (
 	"k8s.io/apimachinery/pkg/util/validation"
 )
 
-// Name is the name of the ResourceQuota managed by the controller in a project namespace.
-const Name = "spx-quota"
+// GetName returns the name of the ResourceQuota of a project. It must stay identical to the
+// name rendered by the sfs-iaas chart (templates/namespace/resourcequota.yaml), so that both
+// manage the same object instead of stacking two quotas.
+func GetName(projectId string) string {
+	return fmt.Sprintf("quota-%s", projectId)
+}
 
 // MaxResources bounds the number of resources of a quota.
 const MaxResources = 128
@@ -48,8 +53,15 @@ func Validate(hard map[string]string) (v1.ResourceList, error) {
 	return list, nil
 }
 
+// IsGitops reports whether the ResourceQuota is managed by GitOps (rendered by the sfs-iaas chart
+// with gitops enabled). Like the other GitOps resources, the controller then leaves it untouched.
+func IsGitops(rq *v1.ResourceQuota) bool {
+	return rq.GetLabels()[spxId.SpxLabelGitops] == "true"
+}
+
 // Apply creates or replaces the ResourceQuota of the project with hard, creating the
 // project namespace if needed. Resources absent from hard are no longer limited.
+// A GitOps-managed ResourceQuota is skipped: it is left as is and no error is returned.
 func Apply(ctx context.Context, orgId, projectId string, hard v1.ResourceList) error {
 	if err := k8s.CreateNamespaceIfNotExists(ctx, orgId, projectId); err != nil {
 		return err
@@ -59,10 +71,11 @@ func Apply(ctx context.Context, orgId, projectId string, hard v1.ResourceList) e
 	namespace := utils.GetNamespace(projectId)
 	client := config.K8sClient.CoreV1().ResourceQuotas(namespace)
 
-	current, err := client.Get(ctx, Name, metav1.GetOptions{})
+	name := GetName(projectId)
+	current, err := client.Get(ctx, name, metav1.GetOptions{})
 	if apierrors.IsNotFound(err) {
 		_, err = client.Create(ctx, &v1.ResourceQuota{
-			ObjectMeta: metav1.ObjectMeta{Name: Name, Namespace: namespace, Labels: m.GetLabels()},
+			ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: namespace, Labels: m.GetLabels()},
 			Spec:       v1.ResourceQuotaSpec{Hard: hard},
 		}, metav1.CreateOptions{})
 		return err
@@ -70,15 +83,46 @@ func Apply(ctx context.Context, orgId, projectId string, hard v1.ResourceList) e
 	if err != nil {
 		return err
 	}
+	if IsGitops(current) {
+		log := logger.GetLogger(ctx)
+		log.Info().Str("namespace", namespace).Str("name", name).Msg("ResourceQuota is managed by GitOps, skipping reconciliation")
+		return nil
+	}
 
+	// The quota may have been created by the sfs-iaas chart: its other labels are kept and the
+	// SPX labels (shared with the chart) are re-applied so that "all" backups still select it.
+	if current.Labels == nil {
+		current.Labels = map[string]string{}
+	}
+	for key, value := range m.GetLabels() {
+		current.Labels[key] = value
+	}
 	current.Spec.Hard = hard
 	_, err = client.Update(ctx, current, metav1.UpdateOptions{})
 	return err
 }
 
-// Delete removes the ResourceQuota of the project, if any.
+// Delete removes the ResourceQuota of the project, if any. A GitOps-managed ResourceQuota is
+// skipped: it is left as is and no error is returned.
 func Delete(ctx context.Context, projectId string) error {
-	err := config.K8sClient.CoreV1().ResourceQuotas(utils.GetNamespace(projectId)).Delete(ctx, Name, metav1.DeleteOptions{})
+	namespace := utils.GetNamespace(projectId)
+	name := GetName(projectId)
+	client := config.K8sClient.CoreV1().ResourceQuotas(namespace)
+
+	current, err := client.Get(ctx, name, metav1.GetOptions{})
+	if apierrors.IsNotFound(err) {
+		return nil
+	}
+	if err != nil {
+		return err
+	}
+	if IsGitops(current) {
+		log := logger.GetLogger(ctx)
+		log.Info().Str("namespace", namespace).Str("name", name).Msg("ResourceQuota is managed by GitOps, skipping deletion")
+		return nil
+	}
+
+	err = client.Delete(ctx, name, metav1.DeleteOptions{})
 	if apierrors.IsNotFound(err) {
 		return nil
 	}

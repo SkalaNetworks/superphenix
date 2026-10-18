@@ -9,7 +9,7 @@ metadata:
 spec:
   hard:
     {{- range $key, $value := .Values.quota }}
-    {{- if not (empty $value) }}
+    {{- if not (or (kindIs "invalid" $value) (eq (toString $value) "")) }}
     {{ $key | quote }}: {{ $value | quote }}
     {{- end }}
     {{- end }}

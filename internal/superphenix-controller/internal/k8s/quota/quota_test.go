@@ -5,6 +5,8 @@ import (
 	"testing"
 
 	"github.com/super-phenix/superphenix/internal/superphenix-controller/pkg/config"
+	v1 "k8s.io/api/core/v1"
+	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/client-go/kubernetes/fake"
 )
@@ -13,6 +15,7 @@ const (
 	orgId     = "11111111-1111-1111-1111-111111111111"
 	projectId = "22222222-2222-2222-2222-222222222222"
 	namespace = "spx-22222222-2222-2222-2222-222222222222"
+	quotaName = "quota-22222222-2222-2222-2222-222222222222"
 )
 
 func TestValidate(t *testing.T) {
@@ -60,7 +63,7 @@ func TestApplyAndDelete(t *testing.T) {
 	if err := Apply(ctx, orgId, projectId, hard); err != nil {
 		t.Fatalf("update: %v", err)
 	}
-	rq, err := fakeClient.CoreV1().ResourceQuotas(namespace).Get(ctx, Name, metav1.GetOptions{})
+	rq, err := fakeClient.CoreV1().ResourceQuotas(namespace).Get(ctx, quotaName, metav1.GetOptions{})
 	if err != nil {
 		t.Fatalf("quota not found: %v", err)
 	}
@@ -77,7 +80,84 @@ func TestApplyAndDelete(t *testing.T) {
 	if err := Delete(ctx, projectId); err != nil {
 		t.Fatalf("delete should be idempotent: %v", err)
 	}
-	if _, err := fakeClient.CoreV1().ResourceQuotas(namespace).Get(ctx, Name, metav1.GetOptions{}); err == nil {
+	if _, err := fakeClient.CoreV1().ResourceQuotas(namespace).Get(ctx, quotaName, metav1.GetOptions{}); err == nil {
 		t.Errorf("quota should be deleted")
+	}
+}
+
+// A quota rendered by the sfs-iaas chart is the same object: the controller replaces its limits
+// and keeps its labels instead of creating a second ResourceQuota.
+func TestApplyAdoptsChartQuota(t *testing.T) {
+	fakeClient := fake.NewClientset(&v1.ResourceQuota{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      quotaName,
+			Namespace: namespace,
+			Labels:    map[string]string{"app.kubernetes.io/managed-by": "Helm"},
+		},
+		Spec: v1.ResourceQuotaSpec{Hard: v1.ResourceList{v1.ResourcePods: resource.MustParse("100")}},
+	})
+	config.K8sClient = fakeClient
+	config.Global.SpxPrefix = "spx"
+	ctx := context.Background()
+
+	hard, _ := Validate(map[string]string{"pods": "5"})
+	if err := Apply(ctx, orgId, projectId, hard); err != nil {
+		t.Fatalf("apply: %v", err)
+	}
+
+	list, err := fakeClient.CoreV1().ResourceQuotas(namespace).List(ctx, metav1.ListOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(list.Items) != 1 {
+		t.Fatalf("expected a single ResourceQuota, got %d", len(list.Items))
+	}
+	rq := list.Items[0]
+	if rq.Spec.Hard.Pods().String() != "5" {
+		t.Errorf("unexpected hard %v", rq.Spec.Hard)
+	}
+	if rq.Labels["app.kubernetes.io/managed-by"] != "Helm" {
+		t.Errorf("chart labels should be kept, got %v", rq.Labels)
+	}
+	if rq.Labels["superphenix.net/organizationID"] != "spx-"+orgId || rq.Labels["superphenix.net/projectID"] != "spx-"+projectId {
+		t.Errorf("spx labels should match the chart ones, got %v", rq.Labels)
+	}
+}
+
+// A GitOps-managed quota is skipped, like the other GitOps resources: neither Apply nor Delete
+// touches it.
+func TestGitopsQuotaIsSkipped(t *testing.T) {
+	fakeClient := fake.NewClientset(&v1.ResourceQuota{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      quotaName,
+			Namespace: namespace,
+			Labels:    map[string]string{"superphenix.net/gitops": "true"},
+		},
+		Spec: v1.ResourceQuotaSpec{Hard: v1.ResourceList{v1.ResourcePods: resource.MustParse("100")}},
+	})
+	config.K8sClient = fakeClient
+	config.Global.SpxPrefix = "spx"
+	ctx := context.Background()
+
+	hard, _ := Validate(map[string]string{"pods": "5"})
+	if err := Apply(ctx, orgId, projectId, hard); err != nil {
+		t.Fatalf("apply: %v", err)
+	}
+	rq, err := fakeClient.CoreV1().ResourceQuotas(namespace).Get(ctx, quotaName, metav1.GetOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if rq.Spec.Hard.Pods().String() != "100" {
+		t.Errorf("gitops quota should not be updated, got %v", rq.Spec.Hard)
+	}
+	if len(rq.Labels) != 1 {
+		t.Errorf("gitops quota labels should not be changed, got %v", rq.Labels)
+	}
+
+	if err := Delete(ctx, projectId); err != nil {
+		t.Fatalf("delete: %v", err)
+	}
+	if _, err := fakeClient.CoreV1().ResourceQuotas(namespace).Get(ctx, quotaName, metav1.GetOptions{}); err != nil {
+		t.Errorf("gitops quota should not be deleted: %v", err)
 	}
 }

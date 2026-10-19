@@ -102,6 +102,28 @@ func Apply(ctx context.Context, orgId, projectId string, hard v1.ResourceList) e
 	return err
 }
 
+// Get returns the limits (`spec.hard`) and the usage (`status.used`) of the ResourceQuota of the
+// project, GitOps-managed or not. Both are empty when the project has no ResourceQuota.
+// Kubernetes only tracks the usage of the resources the quota limits.
+func Get(ctx context.Context, projectId string) (hard, used v1.ResourceList, err error) {
+	namespace := utils.GetNamespace(projectId)
+	current, err := config.K8sClient.CoreV1().ResourceQuotas(namespace).Get(ctx, GetName(projectId), metav1.GetOptions{})
+	if apierrors.IsNotFound(err) {
+		return v1.ResourceList{}, v1.ResourceList{}, nil
+	}
+	if err != nil {
+		return nil, nil, err
+	}
+	hard, used = current.Spec.Hard, current.Status.Used
+	if hard == nil {
+		hard = v1.ResourceList{}
+	}
+	if used == nil {
+		used = v1.ResourceList{}
+	}
+	return hard, used, nil
+}
+
 // Delete removes the ResourceQuota of the project, if any. A GitOps-managed ResourceQuota is
 // skipped: it is left as is and no error is returned.
 func Delete(ctx context.Context, projectId string) error {

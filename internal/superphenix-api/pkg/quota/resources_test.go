@@ -128,3 +128,26 @@ func TestEffectiveAZQuota(t *testing.T) {
 		EffectiveAZQuota(Resources{Memory: "8Gi"}, Resources{CPU: "8"}, az),
 		"resources limited by the organization are enforced even if the project quota predates them")
 }
+
+func TestFromKubernetesUsage(t *testing.T) {
+	got := FromKubernetesUsage(map[string]string{
+		"requests.cpu":     "1500m",
+		"limits.cpu":       "2",
+		"requests.memory":  "1Gi",
+		"requests.storage": "10Gi",
+		"pods":             "3",
+		"limits.memory":    "invalid",
+	})
+	want := Quantities{CPU: 2000, Memory: 1 << 30, Disk: 10 << 30}
+	if len(got) != len(want) {
+		t.Fatalf("got %v, want %v", got, want)
+	}
+	for name, v := range want {
+		if got[name] != v {
+			t.Fatalf("%s: got %d, want %d", name, got[name], v)
+		}
+	}
+	if len(FromKubernetesUsage(nil)) != 0 {
+		t.Fatal("expected no usage")
+	}
+}

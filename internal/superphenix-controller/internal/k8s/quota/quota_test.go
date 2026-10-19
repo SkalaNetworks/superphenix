@@ -161,3 +161,37 @@ func TestGitopsQuotaIsSkipped(t *testing.T) {
 		t.Errorf("gitops quota should not be deleted: %v", err)
 	}
 }
+
+func TestGet(t *testing.T) {
+	fakeClient := fake.NewClientset()
+	config.K8sClient = fakeClient
+	config.Global.SpxPrefix = "spx"
+	ctx := context.Background()
+
+	hard, used, err := Get(ctx, projectId)
+	if err != nil || len(hard) != 0 || len(used) != 0 {
+		t.Fatalf("no quota: got hard=%v used=%v err=%v", hard, used, err)
+	}
+
+	_, err = fakeClient.CoreV1().ResourceQuotas(namespace).Create(ctx, &v1.ResourceQuota{
+		ObjectMeta: metav1.ObjectMeta{Name: quotaName, Namespace: namespace},
+		Spec:       v1.ResourceQuotaSpec{Hard: v1.ResourceList{"requests.cpu": resource.MustParse("4")}},
+		Status: v1.ResourceQuotaStatus{
+			Hard: v1.ResourceList{"requests.cpu": resource.MustParse("4")},
+			Used: v1.ResourceList{"requests.cpu": resource.MustParse("1500m")},
+		},
+	}, metav1.CreateOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	hard, used, err = Get(ctx, projectId)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if q := hard["requests.cpu"]; q.String() != "4" {
+		t.Fatalf("hard = %v", hard)
+	}
+	if q := used["requests.cpu"]; q.String() != "1500m" {
+		t.Fatalf("used = %v", used)
+	}
+}

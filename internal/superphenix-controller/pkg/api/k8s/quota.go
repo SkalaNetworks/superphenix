@@ -1,6 +1,7 @@
 package k8s
 
 import (
+	"encoding/json"
 	"net/http"
 
 	"github.com/super-phenix/superphenix/internal/superphenix-controller/internal/k8s/quota"
@@ -11,6 +12,7 @@ import (
 
 	"github.com/go-chi/chi/v5"
 	"github.com/google/uuid"
+	v1 "k8s.io/api/core/v1"
 )
 
 const baseQuotaEndpoint = "/quota"
@@ -24,11 +26,58 @@ type QuotaBody struct {
 	Hard map[string]string `json:"hard"`
 }
 
+// QuotaStatus is the ResourceQuota of a project in this AZ: its limits and what is currently used.
+type QuotaStatus struct {
+	// Hard holds the ResourceQuota `spec.hard` entries.
+	Hard map[string]string `json:"hard"`
+	// Used holds the ResourceQuota `status.used` entries, only tracked for the limited resources.
+	Used map[string]string `json:"used"`
+}
+
 // QuotaEndpoint is only called by the Superphenix API: it is not proxied to tenants.
 func QuotaEndpoint(router chi.Router) {
 	router.Route(baseQuotaEndpoint, func(r chi.Router) {
+		r.Get("/", getQuota)
 		r.Put("/", setQuota)
 	})
+}
+
+// getQuota
+//
+//	@Summary		Get the project quota
+//	@Description	Get the limits and the usage of the ResourceQuota of the project in this AZ. Both are empty when there is none.
+//	@Tags			v1, Quota
+//	@Produce		json
+//	@Param			orgId		path	string	true	"Organization ID"
+//	@Param			projectId	path	string	true	"Project ID"
+//	@Success		200	{object}	QuotaStatus
+//	@Failure		400
+//	@Failure		500
+//	@Router			/{orgId}/{projectId}/quota [get]
+func getQuota(w http.ResponseWriter, r *http.Request) {
+	log := logger.GetLogger(r.Context())
+	_, projectId, ok := parseQuotaParams(w, r)
+	if !ok {
+		return
+	}
+
+	hard, used, err := quota.Get(r.Context(), projectId)
+	if err != nil {
+		log.Err(err).Str("projectId", projectId).Msg("failed to get project quota")
+		httpError.Http(w, r, http.StatusInternalServerError).Msg("failed to get project quota")
+		return
+	}
+	status := QuotaStatus{Hard: toStrings(hard), Used: toStrings(used)}
+	w.Header().Set("Content-Type", "application/json")
+	_ = json.NewEncoder(w).Encode(status)
+}
+
+func toStrings(list v1.ResourceList) map[string]string {
+	res := make(map[string]string, len(list))
+	for name, q := range list {
+		res[string(name)] = q.String()
+	}
+	return res
 }
 
 // setQuota

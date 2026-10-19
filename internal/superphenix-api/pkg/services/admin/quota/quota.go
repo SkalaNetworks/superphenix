@@ -22,6 +22,11 @@ func (h *Service) GetOrganizationQuota(w http.ResponseWriter, r *http.Request) {
 	quotaService.WriteJSON(w, http.StatusOK, overview)
 }
 
+// GetOrganizationQuotaUsage handles GET /organization/{orgaId}/usage
+func (h *Service) GetOrganizationQuotaUsage(w http.ResponseWriter, r *http.Request) {
+	quotaService.WriteOrganizationUsage(w, r)
+}
+
 // SetOrganizationQuota handles PUT /organization/{orgaId}
 func (h *Service) SetOrganizationQuota(w http.ResponseWriter, r *http.Request) {
 	orgID, ok := quotaService.ParseID(w, r, "orgaId")

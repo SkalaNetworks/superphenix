@@ -152,6 +152,11 @@ func ListProjectIds(ctx context.Context, orgId uuid.UUID) ([]uuid.UUID, error) {
 	return ids, err
 }
 
+// CheckProject ensures the project exists and belongs to the organization (ErrProjectNotFound otherwise).
+func CheckProject(ctx context.Context, orgId, projectId uuid.UUID) error {
+	return checkProject(db.Client.WithContext(ctx), orgId, projectId)
+}
+
 // GetProjectQuota retrieves a project's quota, or nil if not defined.
 func GetProjectQuota(ctx context.Context, projectId uuid.UUID) (*model.ProjectQuota, error) {
 	return findProjectQuota(db.Client.WithContext(ctx), projectId)

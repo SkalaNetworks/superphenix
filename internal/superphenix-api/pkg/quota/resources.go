@@ -109,6 +109,31 @@ func (r Resources) ToKubernetesQuota() map[string]string {
 	return hard
 }
 
+// FromKubernetesUsage translates the `status.used` entries of a ResourceQuota back into abstract
+// quantities. When a resource produces several Kubernetes keys (cpu: requests.cpu and
+// limits.cpu), its usage is the highest of them, since that is the one closest to its limit.
+// A resource is only reported when at least one of its keys is tracked (Kubernetes only tracks
+// the limited ones); unknown keys and invalid quantities are ignored.
+func FromKubernetesUsage(used map[string]string) Quantities {
+	res := Quantities{}
+	for name, keys := range translations {
+		for _, k := range keys {
+			value, ok := used[k]
+			if !ok {
+				continue
+			}
+			v, err := parseQuantity(name, value)
+			if err != nil {
+				continue
+			}
+			if current, seen := res[name]; !seen || v > current {
+				res[name] = v
+			}
+		}
+	}
+	return res
+}
+
 // Resources formats Quantities back into Resources.
 func (q Quantities) Resources() Resources {
 	r := make(Resources, len(q))

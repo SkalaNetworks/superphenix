@@ -47,6 +47,39 @@ func (h *Service) GetProjectQuota(w http.ResponseWriter, r *http.Request) {
 	WriteJSON(w, http.StatusOK, overview)
 }
 
+// GetOrganizationQuotaUsage handles GET /organization/{orgaId}/quota/usage
+func (h *Service) GetOrganizationQuotaUsage(w http.ResponseWriter, r *http.Request) {
+	WriteOrganizationUsage(w, r)
+}
+
+// WriteOrganizationUsage answers what the organization of the orgaId path parameter currently
+// uses, per project and AZ (shared with the admin API).
+func WriteOrganizationUsage(w http.ResponseWriter, r *http.Request) {
+	orgID, ok := ParseID(w, r, "orgaId")
+	if !ok {
+		return
+	}
+	usage, err := quotasync.GetOrganizationUsage(r.Context(), orgID)
+	if err != nil {
+		WriteError(w, r, err, "failed to get organization quota usage")
+		return
+	}
+	WriteJSON(w, http.StatusOK, usage)
+}
+
+// GetProjectQuotaUsage handles GET /organization/{orgaId}/project/{projectId}/quota/usage
+func (h *Service) GetProjectQuotaUsage(w http.ResponseWriter, r *http.Request) {
+	orgID, projID, ok := parseOrgAndProject(w, r)
+	if !ok {
+		return
+	}
+	if err := crudQuota.CheckProject(r.Context(), orgID, projID); err != nil {
+		WriteError(w, r, err, "failed to get project quota usage")
+		return
+	}
+	WriteJSON(w, http.StatusOK, quotasync.GetProjectUsage(r.Context(), orgID, projID))
+}
+
 // SetProjectQuota handles PUT /organization/{orgaId}/project/{projectId}/quota
 func (h *Service) SetProjectQuota(w http.ResponseWriter, r *http.Request) {
 	orgID, projID, ok := parseOrgAndProject(w, r)

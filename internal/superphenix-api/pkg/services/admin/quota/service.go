@@ -12,6 +12,7 @@ const ModuleName = "admin_quota"
 
 type API interface {
 	GetOrganizationQuota(http.ResponseWriter, *http.Request)
+	GetOrganizationQuotaUsage(http.ResponseWriter, *http.Request)
 	SetOrganizationQuota(http.ResponseWriter, *http.Request)
 	DeleteOrganizationQuota(http.ResponseWriter, *http.Request)
 }
@@ -33,6 +34,7 @@ func Module(cfg *config.Config, s API) router.Module {
 		Middlewares: []router.Middleware{authentication.SecretAuth(cfg.AdminHTTP.AuthSecret)},
 		Routes: []router.Route{
 			router.Get("/organization/{orgaId}", s.GetOrganizationQuota),
+			router.Get("/organization/{orgaId}/usage", s.GetOrganizationQuotaUsage),
 			router.Put("/organization/{orgaId}", s.SetOrganizationQuota),
 			router.Delete("/organization/{orgaId}", s.DeleteOrganizationQuota),
 		},

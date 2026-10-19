@@ -3,7 +3,7 @@
 // ResourceQuota `spec.hard` entries sent to the controller of each AZ.
 //
 // A quota is a flat map of resource name to quantity. Only the abstract
-// resources cpu, memory and storage are allowed for now; each one is translated
+// resources cpu, memory and disk are allowed for now; each one is translated
 // into one or several Kubernetes quota keys.
 //
 // Semantics: a resource absent from the map is not limited by this level, a
@@ -22,9 +22,9 @@ import (
 
 // Abstract resources, translated by ToKubernetesQuota.
 const (
-	CPU     = "cpu"
-	Memory  = "memory"
-	Storage = "storage"
+	CPU    = "cpu"
+	Memory = "memory"
+	Disk   = "disk"
 )
 
 var ErrInvalidResources = errors.New("invalid quota resources")
@@ -32,9 +32,9 @@ var ErrInvalidResources = errors.New("invalid quota resources")
 // translations maps each allowed abstract resource to the Kubernetes quota keys it produces.
 // A resource missing from this map is rejected.
 var translations = map[string][]string{
-	CPU:     {"requests.cpu", "limits.cpu"},
-	Memory:  {"requests.memory", "limits.memory"},
-	Storage: {"requests.storage"},
+	CPU:    {"requests.cpu", "limits.cpu"},
+	Memory: {"requests.memory", "limits.memory"},
+	Disk:   {"requests.storage"},
 }
 
 // Resources is the abstract quota of an organization, a project or a project AZ.

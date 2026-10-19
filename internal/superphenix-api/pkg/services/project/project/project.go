@@ -236,14 +236,23 @@ func InitializeProject(ctx context.Context, userId, orgaId uuid.UUID, name strin
 	}
 
 	// A project created in an organization with a quota gets 0 for every limited
-	// resource, until a project quota is given to it.
-	if err := quotasync.Project(ctx, orgaId, projectEntity.ID); err != nil {
-		log.Err(err).Str("userId", userId.String()).Any("project", projectEntity).Msg("Failed to apply project quota")
+	// resource, until a project quota is given to it. When the quota cannot be applied,
+	// the creation soft-fails: the project is kept but deactivated.
+	quotaErr := quotasync.Initialize(ctx, orgaId, projectEntity.ID)
+	if quotaErr != nil {
+		log.Err(quotaErr).Str("userId", userId.String()).Any("project", projectEntity).Msg("Failed to apply project quota")
 	}
 
-	if config.Global.UserSettings.EnableProjectDefaultResources {
+	if quotaErr == nil && config.Global.UserSettings.EnableProjectDefaultResources {
 		if err := controller.InitializeProjectDefaultResources(ctx, orgaId, projectEntity.ID); err != nil {
 			log.Err(err).Str("userId", userId.String()).Any("project", projectEntity).Msg("Failed to initialize default resources in project")
+		}
+	}
+
+	// Report the deactivation, if any, to the caller.
+	if quotaErr != nil {
+		if projectEntity.Deactivations, err = project.ListDeactivations(ctx, orgaId, projectEntity.ID); err != nil {
+			log.Err(err).Str("userId", userId.String()).Any("project", projectEntity).Msg("Failed to read project deactivations")
 		}
 	}
 

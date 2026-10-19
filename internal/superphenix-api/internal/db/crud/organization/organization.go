@@ -78,7 +78,7 @@ func FindCompleteOrgById(orgaId string) (httpModel.APIOrganization, error) {
 		Model: model.Model{
 			ID: orgaUuid,
 		},
-	}, "Users", "UserRoles", "Projects")
+	}, "Users", "UserRoles", "Projects", "Projects.Deactivations")
 
 	if err != nil {
 		return httpModel.APIOrganization{}, err

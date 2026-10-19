@@ -19,7 +19,9 @@ import (
 	"github.com/google/uuid"
 
 	"github.com/super-phenix/superphenix/internal/superphenix-api/internal/az"
+	crudProject "github.com/super-phenix/superphenix/internal/superphenix-api/internal/db/crud/project"
 	crudQuota "github.com/super-phenix/superphenix/internal/superphenix-api/internal/db/crud/quota"
+	"github.com/super-phenix/superphenix/internal/superphenix-api/internal/db/model"
 	"github.com/super-phenix/superphenix/internal/superphenix-api/pkg/api/publicHttp/proxy"
 	"github.com/super-phenix/superphenix/internal/superphenix-api/pkg/config"
 	logger "github.com/super-phenix/superphenix/pkg/utils/log"
@@ -37,24 +39,73 @@ type controllerBody struct {
 
 // Project pushes the quota of a project to the given AZs (every AZ of the organization
 // when none is given).
+//
+// When every AZ is targeted and the push succeeds, the project is reactivated if it was
+// deactivated because its quota could not be applied (see Initialize).
 func Project(ctx context.Context, orgId, projectId uuid.UUID, azCodes ...string) error {
-	h, err := crudQuota.GetHierarchy(ctx, orgId, projectId)
+	failed, _, err := apply(ctx, orgId, projectId, azCodes)
 	if err != nil {
 		return err
-	}
-
-	log := logger.GetLogger(ctx)
-	var failed []string
-	for _, azCfg := range targets(orgId, azCodes) {
-		if err := push(ctx, azCfg, orgId, projectId, h.AZ(azCfg.Code).ToKubernetesQuota()); err != nil {
-			log.Err(err).Str("az", azCfg.Code).Str("projectId", projectId.String()).Msg("failed to apply quota")
-			failed = append(failed, azCfg.Code)
-		}
 	}
 	if len(failed) > 0 {
 		return fmt.Errorf("%w: %s", ErrNotApplied, strings.Join(failed, ", "))
 	}
+	if len(azCodes) == 0 {
+		if err := crudProject.Reactivate(ctx, projectId, model.DeactivationQuota); err != nil {
+			return err
+		}
+	}
 	return nil
+}
+
+// Initialize pushes the quota of a new project to every AZ. Project creation does not fail
+// when the quota cannot be applied: the project is kept but deactivated (every operation on
+// its resources is refused) until a later push of its whole quota succeeds, e.g. by setting
+// its project quota or the organization quota again. A project with nothing to enforce in
+// the failing AZs is not deactivated.
+func Initialize(ctx context.Context, orgId, projectId uuid.UUID) error {
+	failed, unenforced, err := apply(ctx, orgId, projectId, nil)
+	if err == nil && len(failed) > 0 {
+		err = fmt.Errorf("%w: %s", ErrNotApplied, strings.Join(failed, ", "))
+	}
+	if err == nil {
+		return nil
+	}
+
+	// An error without any failed AZ means the quota could not even be computed.
+	if len(failed) == 0 || len(unenforced) > 0 {
+		msg := "quota not applied"
+		if len(unenforced) > 0 {
+			msg += " on: " + strings.Join(unenforced, ", ")
+		}
+		if errDeactivate := crudProject.Deactivate(ctx, projectId, model.DeactivationQuota, msg); errDeactivate != nil {
+			return errors.Join(err, errDeactivate)
+		}
+	}
+	return err
+}
+
+// apply pushes the quota of a project to the given AZs (every AZ when none is given). It
+// returns the AZs where the push failed, and among them those where a quota had to be
+// enforced (a failed push of an empty quota leaves at worst a stricter quota in place).
+func apply(ctx context.Context, orgId, projectId uuid.UUID, azCodes []string) (failed, unenforced []string, err error) {
+	h, err := crudQuota.GetHierarchy(ctx, orgId, projectId)
+	if err != nil {
+		return nil, nil, err
+	}
+
+	log := logger.GetLogger(ctx)
+	for _, azCfg := range targets(orgId, azCodes) {
+		hard := h.AZ(azCfg.Code).ToKubernetesQuota()
+		if err := push(ctx, azCfg, orgId, projectId, hard); err != nil {
+			log.Err(err).Str("az", azCfg.Code).Str("projectId", projectId.String()).Msg("failed to apply quota")
+			failed = append(failed, azCfg.Code)
+			if len(hard) > 0 {
+				unenforced = append(unenforced, azCfg.Code)
+			}
+		}
+	}
+	return failed, unenforced, nil
 }
 
 // Organization pushes the quota of every project of the organization to every AZ.

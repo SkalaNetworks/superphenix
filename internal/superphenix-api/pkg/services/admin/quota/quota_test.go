@@ -56,6 +56,8 @@ func TestAdminGetOrganizationQuota(t *testing.T) {
 		WillReturnRows(sqlmock.NewRows([]string{"organization_id", "resources"}).AddRow(orgID, `{"cpu":"64"}`))
 	mock.ExpectQuery(regexp.QuoteMeta(`SELECT * FROM "project_quotas"`)).
 		WillReturnRows(sqlmock.NewRows([]string{"project_id", "organization_id", "resources"}).AddRow(uuid.New(), orgID, `{"cpu":"16"}`))
+	mock.ExpectQuery(regexp.QuoteMeta(`SELECT * FROM "project_az_quotas"`)).
+		WillReturnRows(sqlmock.NewRows([]string{"project_id", "code_az", "resources"}))
 
 	rr := httptest.NewRecorder()
 	newRouter().ServeHTTP(rr, httptest.NewRequest(http.MethodGet, "/organization/"+orgID.String(), nil))
@@ -120,7 +122,7 @@ func expectDeleteAndSync(mock sqlmock.Sqlmock, orgID, projectID uuid.UUID) {
 		WillReturnRows(sqlmock.NewRows([]string{"id"}).AddRow(projectID))
 	mock.ExpectQuery(regexp.QuoteMeta(`SELECT * FROM "organization_quotas"`)).WillReturnRows(sqlmock.NewRows([]string{"organization_id"}))
 	mock.ExpectQuery(regexp.QuoteMeta(`SELECT * FROM "project_quotas"`)).
-		WillReturnRows(sqlmock.NewRows([]string{"project_id", "organization_id", "resources"}).AddRow(projectID, orgID, `{"cpu":"4","storage":"10Gi"}`))
+		WillReturnRows(sqlmock.NewRows([]string{"project_id", "organization_id", "resources"}).AddRow(projectID, orgID, `{"cpu":"4","disk":"10Gi"}`))
 	mock.ExpectQuery(regexp.QuoteMeta(`SELECT * FROM "project_az_quotas"`)).
 		WillReturnRows(sqlmock.NewRows([]string{"project_id", "code_az", "resources"}).AddRow(projectID, "az1", `{"cpu":"2"}`))
 }
@@ -130,12 +132,18 @@ func TestAdminDeleteOrganizationQuota(t *testing.T) {
 
 	t.Run("pushes the remaining project quota to the AZ controllers", func(t *testing.T) {
 		pushed := fakeController(t, http.StatusNoContent)
-		expectDeleteAndSync(setupMockDB(t), orgID, projectID)
+		mock := setupMockDB(t)
+		expectDeleteAndSync(mock, orgID, projectID)
+		// Applied on every AZ: a project deactivated by a failed quota push is reactivated.
+		mock.ExpectBegin()
+		mock.ExpectExec(regexp.QuoteMeta(`DELETE FROM "project_deactivations" WHERE project_id = $1 AND reason = $2`)).
+			WithArgs(projectID, "quota").WillReturnResult(sqlmock.NewResult(0, 0))
+		mock.ExpectCommit()
 
 		rr := httptest.NewRecorder()
 		newRouter().ServeHTTP(rr, httptest.NewRequest(http.MethodDelete, "/organization/"+orgID.String(), nil))
 		assert.Equal(t, http.StatusNoContent, rr.Code)
-		// The project still limits storage, without AZ share: enforced at 0.
+		// The project still limits disk, without AZ share: enforced at 0.
 		assert.Equal(t, map[string]string{"requests.cpu": "2", "limits.cpu": "2", "requests.storage": "0"},
 			pushed["PUT /"+orgID.String()+"/"+projectID.String()+"/quota"])
 	})

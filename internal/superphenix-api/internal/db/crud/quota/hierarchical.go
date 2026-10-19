@@ -49,7 +49,7 @@ type ProjectQuotaOverview struct {
 }
 
 // GetOrganizationQuotaOverview returns the organization quota (unlimited when not defined),
-// the sum allocated to its projects and what remains.
+// the sum allocated to its projects (see projectAllocations) and what remains.
 func GetOrganizationQuotaOverview(ctx context.Context, orgId uuid.UUID) (OrganizationQuotaOverview, error) {
 	tx := db.Client.WithContext(ctx)
 	overview := OrganizationQuotaOverview{OrganizationId: orgId.String(), Unlimited: true}
@@ -62,10 +62,11 @@ func GetOrganizationQuotaOverview(ctx context.Context, orgId uuid.UUID) (Organiz
 	if err != nil {
 		return overview, err
 	}
-	allocated, err := sumProjectQuotas(pqs)
+	allocations, err := projectAllocations(tx, orgId, pqs)
 	if err != nil {
 		return overview, err
 	}
+	allocated := sum(allocations)
 
 	overview.ProjectQuotas = pqs
 	overview.Allocated = allocated.Resources()
@@ -161,7 +162,8 @@ func GetProjectQuota(ctx context.Context, projectId uuid.UUID) (*model.ProjectQu
 // When no project quota exists yet, the organization quota is split equally among the
 // projects of the organization, and each project quota among the AZs of the organization.
 // Otherwise the existing project quotas are kept, even if they exceed the new organization
-// quota: the projects are then overcommitted and can only lower their quotas.
+// quota (set below them, or lowered): the projects are then overcommitted and can only lower
+// their quotas until they fit again (see checkCapacity).
 func SetOrganizationQuota(ctx context.Context, orgId uuid.UUID, resources model.QuotaResources) (*model.OrganizationQuota, error) {
 	parsedOrg, err := resources.Parse()
 	if err != nil {
@@ -200,12 +202,13 @@ func SetOrganizationQuota(ctx context.Context, orgId uuid.UUID, resources model.
 	return &saved, nil
 }
 
-// SetProjectQuota sets the quota of a project of the organization, and splits it equally
-// among the AZs of the organization (overwriting the previous AZ quotas).
+// SetProjectQuota sets the quota of a project of the organization. When the project has no
+// AZ quota yet, it is split equally among the AZs of the organization; otherwise the AZ quotas
+// are kept as they are (they may then exceed the project quota, see checkCapacity).
 //
 // The project quota can be set whether or not the organization has a quota. When it has
-// one, the sum of the project quotas must fit in it, except for the resources that are
-// not increased (see checkCapacity).
+// one, the sum of the project allocations (see projectAllocations) must fit in it, except
+// for the resources that are not increased (see checkCapacity).
 func SetProjectQuota(ctx context.Context, orgId, projectId uuid.UUID, resources model.QuotaResources) (*model.ProjectQuota, error) {
 	parsedProj, err := resources.Parse()
 	if err != nil {
@@ -234,22 +237,13 @@ func SetProjectQuota(ctx context.Context, orgId, projectId uuid.UUID, resources 
 			if err != nil {
 				return err
 			}
-			current := spxQuota.Quantities{}
-			others := slices.DeleteFunc(pqs, func(pq model.ProjectQuota) bool {
-				if pq.ProjectId != projectId {
-					return false
-				}
-				current, err = pq.Resources.Parse()
-				return true
-			})
+			allocations, err := projectAllocations(tx, orgId, pqs)
 			if err != nil {
 				return err
 			}
-			allocated, err := sumProjectQuotas(others)
-			if err != nil {
-				return err
-			}
-			if err := checkCapacity(parsedProj, current, allocated, parsedOrg, ErrOrgQuotaExceeded); err != nil {
+			current := allocations[projectId]
+			delete(allocations, projectId)
+			if err := checkCapacity(parsedProj, current, sum(allocations), parsedOrg, ErrOrgQuotaExceeded); err != nil {
 				return err
 			}
 		}
@@ -318,26 +312,37 @@ func SetProjectAZQuota(ctx context.Context, orgId, projectId uuid.UUID, codeAZ s
 	return &saved, nil
 }
 
-// projectLimit returns the limit the AZ quotas of a project must fit in, or nil when nothing
-// limits them: the project quota when defined, otherwise, when the organization has a quota,
-// 0 for every resource the organization limits (a project without quota in a limited
-// organization gets nothing, like in EffectiveAZQuota, so its AZ quotas cannot escape the
-// organization quota on those resources).
+// projectLimit returns the limit the AZ quotas of a project must fit in, or nil when neither
+// the project nor the organization has a quota: the project quota, plus 0 for every resource
+// the organization limits but the project quota does not (the project gets nothing of it, like
+// in EffectiveAZQuota, so its AZ quotas cannot escape the organization quota).
 func projectLimit(tx *gorm.DB, orgId, projectId uuid.UUID) (spxQuota.Quantities, error) {
 	pq, err := findProjectQuota(tx, projectId)
 	if err != nil {
 		return nil, err
 	}
-	if pq != nil {
-		return pq.Resources.Parse()
-	}
 	oq, err := findOrganizationQuota(tx, orgId)
-	if err != nil || oq == nil {
+	if err != nil {
 		return nil, err
 	}
+	if pq == nil && oq == nil {
+		return nil, nil
+	}
+
 	limit := spxQuota.Quantities{}
-	for name := range oq.Resources {
-		limit[name] = 0
+	if oq != nil {
+		for name := range oq.Resources {
+			limit[name] = 0
+		}
+	}
+	if pq != nil {
+		parsed, err := pq.Resources.Parse()
+		if err != nil {
+			return nil, err
+		}
+		for name, v := range parsed {
+			limit[name] = v
+		}
 	}
 	return limit, nil
 }
@@ -376,28 +381,41 @@ func DeleteProjectQuota(ctx context.Context, orgId, projectId uuid.UUID) error {
 // limit, allocated being the sum of the other children. Resources the parent does not limit
 // are free.
 //
-// Overcommitment is tolerated: the children may exceed the parent (e.g. when the parent
-// quota is set or lowered after them). A resource that would exceed the limit is then only
-// refused if it is increased, so the children cannot grow further and can only be lowered.
+// Overcommitment is tolerated: the children may exceed the parent when the parent quota is
+// set or lowered below them (or, for AZ quotas, when the project quota is). A resource that
+// would exceed the limit is then only refused if it is increased, so the children cannot grow
+// further and can only be lowered until they fit again.
 func checkCapacity(requested, current, allocated, limit spxQuota.Quantities, errExceeded error) error {
-	increased := spxQuota.Quantities{}
+	increased, checked := spxQuota.Quantities{}, spxQuota.Quantities{}
 	for name, v := range requested {
-		if v > current[name] {
+		if l, limited := limit[name]; limited && v > current[name] {
 			increased[name] = v
+			checked[name] = l
 		}
 	}
-	if msg, exceeded := allocated.Add(increased).Exceeds(limit); exceeded {
+	// Only the increased resources are checked: a resource already overcommitted by the other
+	// children must not block a request that does not increase it.
+	if msg, exceeded := allocated.Add(increased).Exceeds(checked); exceeded {
 		return fmt.Errorf("%w: %s", errExceeded, msg)
 	}
 	return nil
 }
 
-// saveProjectQuota writes a project quota (parsed being its parsed form), then splits it
-// equally among the AZs of the organization, overwriting the previous AZ quotas.
+// saveProjectQuota writes a project quota (parsed being its parsed form). When the project has
+// no AZ quota yet, the quota is split equally among the AZs of the organization; AZ quotas
+// already defined are never overwritten.
 func saveProjectQuota(tx *gorm.DB, orgId, projectId uuid.UUID, resources model.QuotaResources, parsed spxQuota.Quantities) (model.ProjectQuota, error) {
 	pq := model.ProjectQuota{ProjectId: projectId, OrganizationId: orgId, Resources: resources}
 	if err := upsert(tx, &pq, []string{"project_id"}, "organization_id", "resources"); err != nil {
 		return pq, err
+	}
+
+	var defined int64
+	if err := tx.Model(&model.ProjectAZQuota{}).Where("project_id = ?", projectId).Count(&defined).Error; err != nil {
+		return pq, err
+	}
+	if defined > 0 {
+		return pq, nil
 	}
 
 	azs := az.FindAll(orgId.String())
@@ -469,20 +487,55 @@ func orNil[T any](row *T, err error) (*T, error) {
 // deleted projects are ignored, so they do not keep consuming the organization quota.
 func listProjectQuotas(tx *gorm.DB, orgId uuid.UUID) ([]model.ProjectQuota, error) {
 	var pqs []model.ProjectQuota
-	err := tx.Where("organization_id = ? AND project_id IN (?)", orgId,
-		tx.Session(&gorm.Session{NewDB: true}).Model(&model.Project{}).Select("id").Where("orga_id = ?", orgId)).
+	err := tx.Where("organization_id = ? AND project_id IN (?)", orgId, liveProjectIds(tx, orgId)).
 		Order("project_id").Find(&pqs).Error
 	return pqs, err
 }
 
-func sumProjectQuotas(pqs []model.ProjectQuota) (spxQuota.Quantities, error) {
-	total := spxQuota.Quantities{}
+// liveProjectIds is the subquery of the IDs of the live projects of the organization.
+func liveProjectIds(tx *gorm.DB, orgId uuid.UUID) *gorm.DB {
+	return tx.Session(&gorm.Session{NewDB: true}).Model(&model.Project{}).Select("id").Where("orga_id = ?", orgId)
+}
+
+// projectAllocations returns what each live project of the organization takes from the
+// organization quota, pqs being their project quotas (see listProjectQuotas): its project
+// quota when it has one, otherwise the sum of its AZ quotas. AZ quotas set while the
+// organization had no quota therefore keep counting once it gets one.
+func projectAllocations(tx *gorm.DB, orgId uuid.UUID, pqs []model.ProjectQuota) (map[uuid.UUID]spxQuota.Quantities, error) {
+	allocations := make(map[uuid.UUID]spxQuota.Quantities, len(pqs))
 	for _, pq := range pqs {
 		parsed, err := pq.Resources.Parse()
 		if err != nil {
 			return nil, err
 		}
-		total = total.Add(parsed)
+		allocations[pq.ProjectId] = parsed
 	}
-	return total, nil
+
+	var azqs []model.ProjectAZQuota
+	if err := tx.Where("project_id IN (?)", liveProjectIds(tx, orgId)).Order("project_id, code_az").Find(&azqs).Error; err != nil {
+		return nil, err
+	}
+	azOnly := map[uuid.UUID]spxQuota.Quantities{}
+	for _, azq := range azqs {
+		if _, ok := allocations[azq.ProjectId]; ok {
+			continue
+		}
+		parsed, err := azq.Resources.Parse()
+		if err != nil {
+			return nil, err
+		}
+		azOnly[azq.ProjectId] = azOnly[azq.ProjectId].Add(parsed)
+	}
+	for projectId, q := range azOnly {
+		allocations[projectId] = q
+	}
+	return allocations, nil
+}
+
+func sum(allocations map[uuid.UUID]spxQuota.Quantities) spxQuota.Quantities {
+	total := spxQuota.Quantities{}
+	for _, q := range allocations {
+		total = total.Add(q)
+	}
+	return total
 }

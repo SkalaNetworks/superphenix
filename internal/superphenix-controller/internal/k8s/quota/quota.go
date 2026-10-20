@@ -4,7 +4,9 @@ package quota
 
 import (
 	"context"
+	"errors"
 	"fmt"
+	"slices"
 	"strings"
 
 	"github.com/super-phenix/superphenix/internal/superphenix-controller/internal/k8s"
@@ -19,7 +21,11 @@ import (
 	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/util/validation"
+	"k8s.io/client-go/util/retry"
 )
+
+// ErrBelowUsage is returned when a limit would be lowered below what the project currently uses.
+var ErrBelowUsage = errors.New("quota below what is currently used")
 
 // GetName returns the name of the ResourceQuota of a project. It must stay identical to the
 // name rendered by the sfs-iaas chart (templates/namespace/resourcequota.yaml), so that both
@@ -62,11 +68,21 @@ func IsGitops(rq *v1.ResourceQuota) bool {
 // Apply creates or replaces the ResourceQuota of the project with hard, creating the
 // project namespace if needed. Resources absent from hard are no longer limited.
 // A GitOps-managed ResourceQuota is skipped: it is left as is and no error is returned.
+//
+// A limit that is lowered cannot go below its `status.used` (ErrBelowUsage), so that capacity
+// still in use is never freed in the API for another AZ or project. The check and the update
+// are atomic: the quota admission updates `status.used` on the same object, so a workload
+// admitted in between makes the update conflict, and the check is run again.
 func Apply(ctx context.Context, orgId, projectId string, hard v1.ResourceList) error {
 	if err := k8s.CreateNamespaceIfNotExists(ctx, orgId, projectId); err != nil {
 		return err
 	}
+	return retry.RetryOnConflict(retry.DefaultRetry, func() error {
+		return apply(ctx, orgId, projectId, hard)
+	})
+}
 
+func apply(ctx context.Context, orgId, projectId string, hard v1.ResourceList) error {
 	m := spxId.Metadata{OrgId: orgId, ProjectId: projectId}
 	namespace := utils.GetNamespace(projectId)
 	client := config.K8sClient.CoreV1().ResourceQuotas(namespace)
@@ -87,6 +103,9 @@ func Apply(ctx context.Context, orgId, projectId string, hard v1.ResourceList) e
 		log := logger.GetLogger(ctx)
 		log.Info().Str("namespace", namespace).Str("name", name).Msg("ResourceQuota is managed by GitOps, skipping reconciliation")
 		return nil
+	}
+	if err := CheckNotBelowUsage(current, hard); err != nil {
+		return err
 	}
 
 	// The quota may have been created by the sfs-iaas chart: its other labels are kept and the
@@ -122,6 +141,28 @@ func Get(ctx context.Context, projectId string) (hard, used v1.ResourceList, err
 		used = v1.ResourceList{}
 	}
 	return hard, used, nil
+}
+
+// CheckNotBelowUsage checks that hard does not lower any limit of current below its
+// `status.used`. Only lowered limits are checked: a limit kept as is (even below the usage, e.g.
+// set before this check) or raised is accepted, and a resource not limited before has no usage.
+func CheckNotBelowUsage(current *v1.ResourceQuota, hard v1.ResourceList) error {
+	names := make([]string, 0, len(hard))
+	for name := range hard {
+		names = append(names, string(name))
+	}
+	slices.Sort(names)
+	for _, name := range names {
+		limit := hard[v1.ResourceName(name)]
+		old, limited := current.Spec.Hard[v1.ResourceName(name)]
+		if !limited || limit.Cmp(old) >= 0 {
+			continue
+		}
+		if used, ok := current.Status.Used[v1.ResourceName(name)]; ok && used.Cmp(limit) > 0 {
+			return fmt.Errorf("%w: %s %s used, above the requested %s", ErrBelowUsage, name, used.String(), limit.String())
+		}
+	}
+	return nil
 }
 
 // Delete removes the ResourceQuota of the project, if any. A GitOps-managed ResourceQuota is

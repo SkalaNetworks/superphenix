@@ -93,6 +93,16 @@ func TestInitialize(t *testing.T) {
 		require.ErrorIs(t, err, ErrNotApplied)
 	})
 
+	t.Run("client gone: the quota is still applied", func(t *testing.T) {
+		setupController(t, http.StatusNoContent)
+		mock := setupMockDB(t)
+		expectHierarchy(mock, orgID, `{"cpu":"8"}`)
+
+		ctx, cancel := context.WithCancel(context.Background())
+		cancel()
+		require.NoError(t, Initialize(ctx, orgID, projectID))
+	})
+
 	t.Run("nothing to enforce: the project stays active", func(t *testing.T) {
 		setupController(t, http.StatusInternalServerError)
 		mock := setupMockDB(t)

@@ -15,6 +15,7 @@ import (
 	"net/http"
 	"slices"
 	"strings"
+	"time"
 
 	"github.com/google/uuid"
 
@@ -29,6 +30,9 @@ import (
 
 const quotaEndpoint = "quota"
 
+// pushTimeout bounds the call to one AZ controller when pushing a quota.
+const pushTimeout = 30 * time.Second
+
 // ErrNotApplied is returned when the quota is saved but could not be pushed to every AZ.
 var ErrNotApplied = errors.New("quota saved but not applied on every availability zone, retry the request")
 
@@ -42,7 +46,11 @@ type controllerBody struct {
 //
 // When every AZ is targeted and the push succeeds, the project is reactivated if it was
 // deactivated because its quota could not be applied (see Initialize).
+//
+// The push is not canceled with ctx (e.g. when the client disconnects), so that a quota
+// saved in the database is not left half applied.
 func Project(ctx context.Context, orgId, projectId uuid.UUID, azCodes ...string) error {
+	ctx = context.WithoutCancel(ctx)
 	failed, _, err := apply(ctx, orgId, projectId, azCodes)
 	if err != nil {
 		return err
@@ -63,7 +71,11 @@ func Project(ctx context.Context, orgId, projectId uuid.UUID, azCodes ...string)
 // its resources is refused) until a later push of its whole quota succeeds, e.g. by setting
 // its project quota or the organization quota again. A project with nothing to enforce in
 // the failing AZs is not deactivated.
+//
+// It is not canceled with ctx: otherwise a client disconnecting during the creation would make
+// both the push and the deactivation fail, leaving an active project without any quota.
 func Initialize(ctx context.Context, orgId, projectId uuid.UUID) error {
+	ctx = context.WithoutCancel(ctx)
 	failed, unenforced, err := apply(ctx, orgId, projectId, nil)
 	if err == nil && len(failed) > 0 {
 		err = fmt.Errorf("%w: %s", ErrNotApplied, strings.Join(failed, ", "))
@@ -110,6 +122,7 @@ func apply(ctx context.Context, orgId, projectId uuid.UUID, azCodes []string) (f
 
 // Organization pushes the quota of every project of the organization to every AZ.
 func Organization(ctx context.Context, orgId uuid.UUID) error {
+	ctx = context.WithoutCancel(ctx)
 	ids, err := crudQuota.ListProjectIds(ctx, orgId)
 	if err != nil {
 		return err
@@ -135,13 +148,29 @@ func targets(orgId uuid.UUID, azCodes []string) []config.AZConfig {
 	return azs
 }
 
+func init() {
+	crudQuota.PushAZ = pushAZ
+}
+
+// pushAZ pushes the Kubernetes quota of a project to one AZ (see crudQuota.PushAZ).
+func pushAZ(ctx context.Context, orgId, projectId uuid.UUID, codeAZ string, hard map[string]string) error {
+	azCfg, err := az.GetByCode(codeAZ, orgId.String())
+	if err != nil {
+		return err
+	}
+	return push(ctx, azCfg, orgId, projectId, hard)
+}
+
 // push sends the Kubernetes quota of a project to the controller of an AZ. An empty
-// quota removes the ResourceQuota.
+// quota removes the ResourceQuota. A limit lowered below its usage is refused by the
+// controller (409), reported as crudQuota.ErrBelowUsage.
 func push(ctx context.Context, azCfg config.AZConfig, orgId, projectId uuid.UUID, hard map[string]string) error {
 	body, err := json.Marshal(controllerBody{Hard: hard})
 	if err != nil {
 		return err
 	}
+	ctx, cancel := context.WithTimeout(ctx, pushTimeout)
+	defer cancel()
 	url := fmt.Sprintf("%s/%s/%s/%s", azCfg.ControllerUrl, orgId, projectId, quotaEndpoint)
 	resp, err := proxy.SendRequest(ctx, url, http.MethodPut, bytes.NewReader(body), azCfg.AuthSecret)
 	if err != nil {
@@ -150,6 +179,9 @@ func push(ctx context.Context, azCfg config.AZConfig, orgId, projectId uuid.UUID
 	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusNoContent && resp.StatusCode != http.StatusOK {
 		msg, _ := io.ReadAll(io.LimitReader(resp.Body, 1024))
+		if resp.StatusCode == http.StatusConflict {
+			return fmt.Errorf("%w in %s", crudQuota.ErrBelowUsage, azCfg.Code)
+		}
 		return fmt.Errorf("controller answered %d: %s", resp.StatusCode, strings.TrimSpace(string(msg)))
 	}
 	return nil

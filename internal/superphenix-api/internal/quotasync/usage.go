@@ -11,6 +11,7 @@ import (
 	"github.com/google/uuid"
 	"golang.org/x/sync/errgroup"
 
+	"github.com/super-phenix/superphenix/internal/superphenix-api/internal/az"
 	crudQuota "github.com/super-phenix/superphenix/internal/superphenix-api/internal/db/crud/quota"
 	"github.com/super-phenix/superphenix/internal/superphenix-api/internal/db/model"
 	"github.com/super-phenix/superphenix/internal/superphenix-api/pkg/api/publicHttp/proxy"
@@ -63,6 +64,26 @@ type OrganizationUsage struct {
 	Complete bool                 `json:"complete"`
 	Used     model.QuotaResources `json:"used"`
 	Projects []ProjectUsage       `json:"projects"`
+}
+
+func init() {
+	crudQuota.ReadUsage = readAZUsage
+}
+
+// readAZUsage reads the quota enforced and used by a project in one AZ (see crudQuota.ReadUsage).
+func readAZUsage(ctx context.Context, orgId, projectId uuid.UUID, codeAZ string) (crudQuota.AZUsage, error) {
+	azCfg, err := az.GetByCode(codeAZ, orgId.String())
+	if err != nil {
+		return crudQuota.AZUsage{}, err
+	}
+	status, err := fetch(ctx, azCfg, orgId, projectId)
+	if err != nil {
+		return crudQuota.AZUsage{}, err
+	}
+	return crudQuota.AZUsage{
+		Hard: spxQuota.FromKubernetesUsage(status.Hard),
+		Used: spxQuota.FromKubernetesUsage(status.Used),
+	}, nil
 }
 
 // GetProjectUsage reads the usage of a project in every AZ of the organization. The caller must

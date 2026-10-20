@@ -164,6 +164,31 @@ func (q Quantities) Add(other Quantities) Quantities {
 	return res
 }
 
+// Max returns the per-resource highest of q and other (union of resources).
+func (q Quantities) Max(other Quantities) Quantities {
+	res := make(Quantities, len(q)+len(other))
+	for name, v := range q {
+		res[name] = v
+	}
+	for name, v := range other {
+		if current, ok := res[name]; !ok || v > current {
+			res[name] = v
+		}
+	}
+	return res
+}
+
+// Only returns the resources of q that keep also has.
+func (q Quantities) Only(keep Quantities) Quantities {
+	res := make(Quantities, len(keep))
+	for name, v := range q {
+		if _, ok := keep[name]; ok {
+			res[name] = v
+		}
+	}
+	return res
+}
+
 // Sub returns q minus other for the resources of q, clamped to 0.
 func (q Quantities) Sub(other Quantities) Quantities {
 	res := make(Quantities, len(q))

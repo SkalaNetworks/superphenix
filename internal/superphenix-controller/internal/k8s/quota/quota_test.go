@@ -2,6 +2,7 @@ package quota
 
 import (
 	"context"
+	"errors"
 	"testing"
 
 	"github.com/super-phenix/superphenix/internal/superphenix-controller/pkg/config"
@@ -193,5 +194,59 @@ func TestGet(t *testing.T) {
 	}
 	if q := used["requests.cpu"]; q.String() != "1500m" {
 		t.Fatalf("used = %v", used)
+	}
+}
+
+func TestApplyRefusesLoweringBelowUsage(t *testing.T) {
+	fakeClient := fake.NewClientset(&v1.ResourceQuota{
+		ObjectMeta: metav1.ObjectMeta{Name: quotaName, Namespace: namespace},
+		Spec: v1.ResourceQuotaSpec{Hard: v1.ResourceList{
+			"requests.cpu": resource.MustParse("10"), "requests.memory": resource.MustParse("8Gi"),
+		}},
+		Status: v1.ResourceQuotaStatus{Used: v1.ResourceList{
+			"requests.cpu": resource.MustParse("6"), "requests.memory": resource.MustParse("10Gi"),
+		}},
+	})
+	config.K8sClient = fakeClient
+	config.Global.SpxPrefix = "spx"
+	ctx := context.Background()
+
+	apply := func(cpu, memory string) error {
+		hard, err := Validate(map[string]string{"requests.cpu": cpu, "requests.memory": memory, "pods": "0"})
+		if err != nil {
+			t.Fatal(err)
+		}
+		return Apply(ctx, orgId, projectId, hard)
+	}
+	currentCPU := func() string {
+		rq, err := fakeClient.CoreV1().ResourceQuotas(namespace).Get(ctx, quotaName, metav1.GetOptions{})
+		if err != nil {
+			t.Fatal(err)
+		}
+		q := rq.Spec.Hard["requests.cpu"]
+		return q.String()
+	}
+
+	// Lowered below the 6 cpu used: refused, the quota is unchanged.
+	if err := apply("5", "8Gi"); !errors.Is(err, ErrBelowUsage) {
+		t.Fatalf("expected ErrBelowUsage, got %v", err)
+	}
+	if got := currentCPU(); got != "10" {
+		t.Errorf("quota changed to %s", got)
+	}
+	// Memory is already above its quota (stored before the check): kept as is, it is accepted,
+	// and cpu can be lowered down to exactly what is used. A new resource (pods) has no usage.
+	if err := apply("6", "8Gi"); err != nil {
+		t.Fatalf("lowering to the usage: %v", err)
+	}
+	if got := currentCPU(); got != "6" {
+		t.Errorf("expected 6 cpu, got %s", got)
+	}
+	// Memory lowered further while above its usage: refused. Raising is always accepted.
+	if err := apply("6", "7Gi"); !errors.Is(err, ErrBelowUsage) {
+		t.Fatalf("expected ErrBelowUsage, got %v", err)
+	}
+	if err := apply("20", "16Gi"); err != nil {
+		t.Fatalf("raise: %v", err)
 	}
 }

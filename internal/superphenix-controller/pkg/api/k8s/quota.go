@@ -2,6 +2,7 @@ package k8s
 
 import (
 	"encoding/json"
+	"errors"
 	"net/http"
 
 	"github.com/super-phenix/superphenix/internal/superphenix-controller/internal/k8s/quota"
@@ -83,7 +84,7 @@ func toStrings(list v1.ResourceList) map[string]string {
 // setQuota
 //
 //	@Summary		Set the project quota
-//	@Description	Create or replace the ResourceQuota of the project in this AZ. An empty quota removes it.
+//	@Description	Create or replace the ResourceQuota of the project in this AZ. An empty quota removes it. A limit cannot be lowered below what is currently used (409).
 //	@Tags			v1, Quota
 //	@Accept			json
 //	@Param			orgId		path	string		true	"Organization ID"
@@ -91,6 +92,7 @@ func toStrings(list v1.ResourceList) map[string]string {
 //	@Param			body		body	QuotaBody	true	"Kubernetes quota"
 //	@Success		204
 //	@Failure		400
+//	@Failure		409
 //	@Failure		500
 //	@Router			/{orgId}/{projectId}/quota [put]
 func setQuota(w http.ResponseWriter, r *http.Request) {
@@ -114,6 +116,10 @@ func setQuota(w http.ResponseWriter, r *http.Request) {
 		err = quota.Delete(r.Context(), projectId)
 	} else {
 		err = quota.Apply(r.Context(), orgId, projectId, hard)
+	}
+	if errors.Is(err, quota.ErrBelowUsage) {
+		httpError.Http(w, r, http.StatusConflict).Msg(err.Error())
+		return
 	}
 	if err != nil {
 		log.Err(err).Str("projectId", projectId).Msg("failed to set project quota")

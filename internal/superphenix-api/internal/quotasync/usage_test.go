@@ -8,9 +8,12 @@ import (
 
 	"github.com/google/uuid"
 	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 
+	crudQuota "github.com/super-phenix/superphenix/internal/superphenix-api/internal/db/crud/quota"
 	"github.com/super-phenix/superphenix/internal/superphenix-api/internal/db/model"
 	"github.com/super-phenix/superphenix/internal/superphenix-api/pkg/config"
+	spxQuota "github.com/super-phenix/superphenix/internal/superphenix-api/pkg/quota"
 )
 
 func TestGetProjectUsage(t *testing.T) {
@@ -53,4 +56,14 @@ func TestGetProjectUsage(t *testing.T) {
 	assert.True(t, usage.AZs[0].Available)
 	assert.False(t, usage.AZs[1].Available)
 	assert.Equal(t, model.QuotaResources{"cpu": "2500m", "memory": "1Gi"}, usage.Used)
+
+	// The reader registered for the crud checks gives the enforced and used quantities of one AZ.
+	azUsage, err := crudQuota.ReadUsage(context.Background(), orgId, projectId, "az1")
+	require.NoError(t, err)
+	assert.Equal(t, spxQuota.Quantities{"cpu": 4000}, azUsage.Hard)
+	assert.Equal(t, spxQuota.Quantities{"cpu": 2500, "memory": 1 << 30}, azUsage.Used)
+	_, err = crudQuota.ReadUsage(context.Background(), orgId, projectId, "az2")
+	require.Error(t, err)
+	_, err = crudQuota.ReadUsage(context.Background(), orgId, projectId, "az-unknown")
+	require.Error(t, err)
 }

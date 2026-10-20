@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"maps"
 	"slices"
 	"strings"
 
@@ -16,6 +17,7 @@ import (
 	"github.com/super-phenix/superphenix/internal/superphenix-api/internal/db/model"
 	"github.com/super-phenix/superphenix/internal/superphenix-api/pkg/config"
 	spxQuota "github.com/super-phenix/superphenix/internal/superphenix-api/pkg/quota"
+	logger "github.com/super-phenix/superphenix/pkg/utils/log"
 )
 
 // Business errors of the hierarchical quotas. Every one of them is caused by the request
@@ -28,7 +30,27 @@ var (
 	ErrProjectNotFound      = errors.New("project not found")
 	ErrAZNotFound           = errors.New("availability zone not found")
 	ErrProjectQuotaEnforced = errors.New("the project quota cannot be removed while the organization has a quota")
+	ErrBelowAllocated       = errors.New("quota below what is already allocated")
+	ErrBelowUsage           = errors.New("quota below what is currently used")
+	ErrUsageUnavailable     = errors.New("quota usage unavailable, retry later")
+	ErrAZUnavailable        = errors.New("availability zone unavailable, retry later")
 )
+
+// AZUsage is the quota of a project as enforced by the cluster of one AZ (Hard, the ResourceQuota
+// `spec.hard`) and what the project uses of it (Used, its `status.used`), as abstract quantities.
+type AZUsage struct {
+	Hard spxQuota.Quantities
+	Used spxQuota.Quantities
+}
+
+// ReadUsage reads the AZUsage of a project in one AZ from the controller of the AZ. It is set
+// by the quotasync package; when nil, lowering an AZ quota fails.
+var ReadUsage func(ctx context.Context, orgId, projectId uuid.UUID, codeAZ string) (AZUsage, error)
+
+// PushAZ sends the Kubernetes quota (`spec.hard`) of a project to the controller of one AZ. The
+// controller refuses to lower a limit below its usage, which PushAZ reports as ErrBelowUsage. It
+// is set by the quotasync package; when nil, lowering an AZ quota fails.
+var PushAZ func(ctx context.Context, orgId, projectId uuid.UUID, codeAZ string, hard map[string]string) error
 
 // OrganizationQuotaOverview is the quota of an organization and its distribution to projects.
 type OrganizationQuotaOverview struct {
@@ -152,6 +174,26 @@ func ListProjectIds(ctx context.Context, orgId uuid.UUID) ([]uuid.UUID, error) {
 	return ids, err
 }
 
+// ListAllProjects lists the live projects of every organization (only their ID and
+// organization ID), ordered by organization then project.
+func ListAllProjects(ctx context.Context) ([]model.Project, error) {
+	var projects []model.Project
+	err := db.Client.WithContext(ctx).Select("id", "orga_id").Order("orga_id").Order("id").Find(&projects).Error
+	return projects, err
+}
+
+// WithOrganizationLock runs fn while holding the row lock the quota writes of the organization
+// take (see lockOrganization), so that fn sees no quota write in progress and none starts until
+// it returns. fn reads the committed quotas through db.Client.
+func WithOrganizationLock(ctx context.Context, orgId uuid.UUID, fn func() error) error {
+	return db.Client.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
+		if err := lockOrganization(tx, orgId); err != nil {
+			return err
+		}
+		return fn()
+	})
+}
+
 // CheckProject ensures the project exists and belongs to the organization (ErrProjectNotFound otherwise).
 func CheckProject(ctx context.Context, orgId, projectId uuid.UUID) error {
 	return checkProject(db.Client.WithContext(ctx), orgId, projectId)
@@ -164,11 +206,13 @@ func GetProjectQuota(ctx context.Context, projectId uuid.UUID) (*model.ProjectQu
 
 // SetOrganizationQuota creates or updates an organization quota (platform administrators only).
 //
-// When no project quota exists yet, the organization quota is split equally among the
-// projects of the organization, and each project quota among the AZs of the organization.
-// Otherwise the existing project quotas are kept, even if they exceed the new organization
-// quota (set below them, or lowered): the projects are then overcommitted and can only lower
-// their quotas until they fit again (see checkCapacity).
+// The organization quota cannot be lower than what its projects are allocated (see
+// projectAllocations), on any resource it limits: ErrBelowAllocated otherwise. The projects
+// must be lowered first.
+//
+// When no project quota exists yet, the organization quota is distributed among the projects
+// of the organization: each one gets what its AZ quotas already hold, plus an equal part of the
+// rest (and, when it has no AZ quota, its project quota is split among the AZs).
 func SetOrganizationQuota(ctx context.Context, orgId uuid.UUID, resources model.QuotaResources) (*model.OrganizationQuota, error) {
 	parsedOrg, err := resources.Parse()
 	if err != nil {
@@ -185,15 +229,24 @@ func SetOrganizationQuota(ctx context.Context, orgId uuid.UUID, resources model.
 		if err != nil {
 			return err
 		}
+		allocations, err := projectAllocations(tx, orgId, pqs)
+		if err != nil {
+			return err
+		}
+		allocated := sum(allocations)
+		if err := checkNotBelow(parsedOrg, allocated, "its projects"); err != nil {
+			return err
+		}
 
 		if len(pqs) == 0 {
 			var projects []model.Project
 			if err := tx.Where("orga_id = ?", orgId).Order("id").Find(&projects).Error; err != nil {
 				return err
 			}
-			share := parsedOrg.SplitEqually(len(projects))
+			share := parsedOrg.Sub(allocated).SplitEqually(len(projects))
 			for _, p := range projects {
-				if _, err := saveProjectQuota(tx, orgId, p.ID, share.Resources(), share); err != nil {
+				pq := share.Add(allocations[p.ID].Only(parsedOrg))
+				if _, err := saveProjectQuota(tx, orgId, p.ID, pq.Resources(), pq); err != nil {
 					return err
 				}
 			}
@@ -209,11 +262,12 @@ func SetOrganizationQuota(ctx context.Context, orgId uuid.UUID, resources model.
 
 // SetProjectQuota sets the quota of a project of the organization. When the project has no
 // AZ quota yet, it is split equally among the AZs of the organization; otherwise the AZ quotas
-// are kept as they are (they may then exceed the project quota, see checkCapacity).
+// are kept as they are.
 //
-// The project quota can be set whether or not the organization has a quota. When it has
-// one, the sum of the project allocations (see projectAllocations) must fit in it, except
-// for the resources that are not increased (see checkCapacity).
+// The project quota cannot be lower than the sum of its AZ quotas, on any resource it limits
+// (ErrBelowAllocated). It can be set whether or not the organization has a quota. When it has
+// one, the sum of the project allocations (see projectAllocations) must fit in it (see
+// checkCapacity).
 func SetProjectQuota(ctx context.Context, orgId, projectId uuid.UUID, resources model.QuotaResources) (*model.ProjectQuota, error) {
 	parsedProj, err := resources.Parse()
 	if err != nil {
@@ -226,6 +280,22 @@ func SetProjectQuota(ctx context.Context, orgId, projectId uuid.UUID, resources 
 			return err
 		}
 		if err := checkProject(tx, orgId, projectId); err != nil {
+			return err
+		}
+
+		azqs, err := listAZQuotas(tx, projectId)
+		if err != nil {
+			return err
+		}
+		azSum := spxQuota.Quantities{}
+		for _, azq := range azqs {
+			parsed, err := azq.Resources.Parse()
+			if err != nil {
+				return err
+			}
+			azSum = azSum.Add(parsed)
+		}
+		if err := checkNotBelow(parsedProj, azSum, "its availability zones"); err != nil {
 			return err
 		}
 
@@ -263,8 +333,13 @@ func SetProjectQuota(ctx context.Context, orgId, projectId uuid.UUID, resources 
 }
 
 // SetProjectAZQuota sets the quota of a project in one AZ, whether or not the project has a
-// quota. The sum of the AZ quotas must fit in the project limit (see projectLimit), except for
-// the resources that are not increased (see checkCapacity).
+// quota. The sum of the AZ quotas must fit in the project limit (see projectLimit and
+// checkCapacity).
+//
+// A resource lowered in the AZ cannot go below what the project currently uses there, read
+// from the cluster (see checkUsage): ErrBelowUsage, or ErrUsageUnavailable when it cannot be read.
+// The lowered quota is then pushed to the AZ before the commit (see pushLowered), so the
+// capacity is only freed in the database once the cluster enforces the lower limit.
 func SetProjectAZQuota(ctx context.Context, orgId, projectId uuid.UUID, codeAZ string, resources model.QuotaResources) (*model.ProjectAZQuota, error) {
 	parsedAZ, err := resources.Parse()
 	if err != nil {
@@ -283,33 +358,66 @@ func SetProjectAZQuota(ctx context.Context, orgId, projectId uuid.UUID, codeAZ s
 			return err
 		}
 
-		limit, err := projectLimit(tx, orgId, projectId)
+		pq, err := findProjectQuota(tx, projectId)
+		if err != nil {
+			return err
+		}
+		oq, err := findOrganizationQuota(tx, orgId)
+		if err != nil {
+			return err
+		}
+		azqs, err := listAZQuotas(tx, projectId)
+		if err != nil {
+			return err
+		}
+		var currentResources model.QuotaResources
+		current, allocated := spxQuota.Quantities{}, spxQuota.Quantities{}
+		for _, azq := range azqs {
+			parsed, err := azq.Resources.Parse()
+			if err != nil {
+				return err
+			}
+			if azq.CodeAZ == codeAZ {
+				current, currentResources = parsed, azq.Resources
+			} else {
+				allocated = allocated.Add(parsed)
+			}
+		}
+
+		limit, err := projectLimit(oq, pq)
 		if err != nil {
 			return err
 		}
 		if limit != nil {
-			var azqs []model.ProjectAZQuota
-			if err := tx.Where("project_id = ?", projectId).Find(&azqs).Error; err != nil {
-				return err
-			}
-			current, allocated := spxQuota.Quantities{}, spxQuota.Quantities{}
-			for _, azq := range azqs {
-				parsed, err := azq.Resources.Parse()
-				if err != nil {
-					return err
-				}
-				if azq.CodeAZ == codeAZ {
-					current = parsed
-				} else {
-					allocated = allocated.Add(parsed)
-				}
-			}
 			if err := checkCapacity(parsedAZ, current, allocated, limit, ErrProjectQuotaExceeded); err != nil {
 				return err
 			}
 		}
 
-		return upsert(tx, &saved, []string{"project_id", "code_az"}, "resources")
+		var orgResources, projResources model.QuotaResources
+		if oq != nil {
+			orgResources = oq.Resources
+		}
+		if pq != nil {
+			projResources = pq.Resources
+		}
+		lowered, err := loweredResources(
+			spxQuota.EffectiveAZQuota(orgResources, projResources, currentResources),
+			spxQuota.EffectiveAZQuota(orgResources, projResources, resources))
+		if err != nil {
+			return err
+		}
+		if err := checkUsage(ctx, orgId, projectId, codeAZ, lowered); err != nil {
+			return err
+		}
+
+		if err := upsert(tx, &saved, []string{"project_id", "code_az"}, "resources"); err != nil {
+			return err
+		}
+		if len(lowered) == 0 {
+			return nil
+		}
+		return pushLowered(ctx, orgId, projectId, codeAZ, spxQuota.EffectiveAZQuota(orgResources, projResources, resources))
 	})
 	if err != nil {
 		return nil, err
@@ -318,18 +426,10 @@ func SetProjectAZQuota(ctx context.Context, orgId, projectId uuid.UUID, codeAZ s
 }
 
 // projectLimit returns the limit the AZ quotas of a project must fit in, or nil when neither
-// the project nor the organization has a quota: the project quota, plus 0 for every resource
-// the organization limits but the project quota does not (the project gets nothing of it, like
-// in EffectiveAZQuota, so its AZ quotas cannot escape the organization quota).
-func projectLimit(tx *gorm.DB, orgId, projectId uuid.UUID) (spxQuota.Quantities, error) {
-	pq, err := findProjectQuota(tx, projectId)
-	if err != nil {
-		return nil, err
-	}
-	oq, err := findOrganizationQuota(tx, orgId)
-	if err != nil {
-		return nil, err
-	}
+// the project (pq) nor the organization (oq) has a quota: the project quota, plus 0 for every
+// resource the organization limits but the project quota does not (the project gets nothing of
+// it, like in EffectiveAZQuota, so its AZ quotas cannot escape the organization quota).
+func projectLimit(oq *model.OrganizationQuota, pq *model.ProjectQuota) (spxQuota.Quantities, error) {
 	if pq == nil && oq == nil {
 		return nil, nil
 	}
@@ -386,10 +486,10 @@ func DeleteProjectQuota(ctx context.Context, orgId, projectId uuid.UUID) error {
 // limit, allocated being the sum of the other children. Resources the parent does not limit
 // are free.
 //
-// Overcommitment is tolerated: the children may exceed the parent when the parent quota is
-// set or lowered below them (or, for AZ quotas, when the project quota is). A resource that
-// would exceed the limit is then only refused if it is increased, so the children cannot grow
-// further and can only be lowered until they fit again.
+// No write can make the children exceed their parent: a parent is never set below its children
+// (see checkNotBelow) and a child never grows past its parent. Only the resources the request
+// increases are checked, which is the same as long as the children fit; it only lets a state
+// stored before these rules (children above their parent) be lowered until it fits again.
 func checkCapacity(requested, current, allocated, limit spxQuota.Quantities, errExceeded error) error {
 	increased, checked := spxQuota.Quantities{}, spxQuota.Quantities{}
 	for name, v := range requested {
@@ -404,6 +504,85 @@ func checkCapacity(requested, current, allocated, limit spxQuota.Quantities, err
 		return fmt.Errorf("%w: %s", errExceeded, msg)
 	}
 	return nil
+}
+
+// checkNotBelow checks that a parent quota (limit) is not lower than what its children are
+// allocated, on every resource it limits. children names them in the error.
+func checkNotBelow(limit, allocated spxQuota.Quantities, children string) error {
+	if msg, exceeded := allocated.Exceeds(limit); exceeded {
+		return fmt.Errorf("%w by %s: %s", ErrBelowAllocated, children, msg)
+	}
+	return nil
+}
+
+// loweredResources returns, from the quota enforced in an AZ after a change, the resources that
+// were already limited before and are lowered.
+func loweredResources(before, after model.QuotaResources) (spxQuota.Quantities, error) {
+	parsedBefore, err := before.Parse()
+	if err != nil {
+		return nil, err
+	}
+	parsedAfter, err := after.Parse()
+	if err != nil {
+		return nil, err
+	}
+	lowered := spxQuota.Quantities{}
+	for name, v := range parsedAfter {
+		if old, limited := parsedBefore[name]; limited && v < old {
+			lowered[name] = v
+		}
+	}
+	return lowered, nil
+}
+
+// checkUsage checks that the lowered resources of a project in an AZ stay above what the
+// project currently uses there, so that capacity still in use is never freed for another AZ or
+// project. The usage is read from the cluster: when it cannot be read, or the resource is not
+// enforced by the cluster (e.g. a previous push failed), the change is refused.
+func checkUsage(ctx context.Context, orgId, projectId uuid.UUID, codeAZ string, lowered spxQuota.Quantities) error {
+	if len(lowered) == 0 {
+		return nil
+	}
+	if ReadUsage == nil {
+		return errors.New("no quota usage reader configured")
+	}
+	usage, err := ReadUsage(ctx, orgId, projectId, codeAZ)
+	if err != nil {
+		log := logger.GetLogger(ctx)
+		log.Err(err).Str("az", codeAZ).Str("projectId", projectId.String()).Msg("failed to read quota usage")
+		return fmt.Errorf("%w: %s", ErrUsageUnavailable, codeAZ)
+	}
+	for _, name := range slices.Sorted(maps.Keys(lowered)) {
+		_, enforced := usage.Hard[name]
+		used, tracked := usage.Used[name]
+		if !enforced || !tracked {
+			return fmt.Errorf("%w: %s is not tracked in %s", ErrUsageUnavailable, name, codeAZ)
+		}
+		if used > lowered[name] {
+			return fmt.Errorf("%w: %s %s used in %s, above the requested %s", ErrBelowUsage, name,
+				spxQuota.Quantities{name: used}.Resources()[name], codeAZ,
+				spxQuota.Quantities{name: lowered[name]}.Resources()[name])
+		}
+	}
+	return nil
+}
+
+// pushLowered pushes the quota enforced in an AZ (effective) to its controller, from within the
+// transaction that lowers it: if the controller refuses it (a workload admitted since the usage
+// was read, ErrBelowUsage) or cannot be reached (ErrAZUnavailable), the change is rolled back, so
+// the database never frees capacity the cluster still grants. If the commit fails after the push,
+// the cluster is left stricter than the database until the next push (or re-sync).
+func pushLowered(ctx context.Context, orgId, projectId uuid.UUID, codeAZ string, effective model.QuotaResources) error {
+	if PushAZ == nil {
+		return errors.New("no quota pusher configured")
+	}
+	err := PushAZ(ctx, orgId, projectId, codeAZ, effective.ToKubernetesQuota())
+	if err == nil || errors.Is(err, ErrBelowUsage) {
+		return err
+	}
+	log := logger.GetLogger(ctx)
+	log.Err(err).Str("az", codeAZ).Str("projectId", projectId.String()).Msg("failed to push lowered quota")
+	return fmt.Errorf("%w: %s", ErrAZUnavailable, codeAZ)
 }
 
 // saveProjectQuota writes a project quota (parsed being its parsed form). When the project has
@@ -488,6 +667,13 @@ func orNil[T any](row *T, err error) (*T, error) {
 	return row, nil
 }
 
+// listAZQuotas lists the AZ quotas of a project.
+func listAZQuotas(tx *gorm.DB, projectId uuid.UUID) ([]model.ProjectAZQuota, error) {
+	var azqs []model.ProjectAZQuota
+	err := tx.Where("project_id = ?", projectId).Find(&azqs).Error
+	return azqs, err
+}
+
 // listProjectQuotas lists the quotas of the live projects of the organization. Quotas of
 // deleted projects are ignored, so they do not keep consuming the organization quota.
 func listProjectQuotas(tx *gorm.DB, orgId uuid.UUID) ([]model.ProjectQuota, error) {
@@ -503,9 +689,11 @@ func liveProjectIds(tx *gorm.DB, orgId uuid.UUID) *gorm.DB {
 }
 
 // projectAllocations returns what each live project of the organization takes from the
-// organization quota, pqs being their project quotas (see listProjectQuotas): its project
-// quota when it has one, otherwise the sum of its AZ quotas. AZ quotas set while the
-// organization had no quota therefore keep counting once it gets one.
+// organization quota, pqs being their project quotas (see listProjectQuotas): per resource,
+// the highest of its project quota and the sum of its AZ quotas (what is actually enforced).
+// AZ quotas set while the organization had no quota therefore keep counting once it gets one,
+// and lowering a project quota below its AZ quotas frees nothing for the other projects until
+// the AZ quotas are lowered too.
 func projectAllocations(tx *gorm.DB, orgId uuid.UUID, pqs []model.ProjectQuota) (map[uuid.UUID]spxQuota.Quantities, error) {
 	allocations := make(map[uuid.UUID]spxQuota.Quantities, len(pqs))
 	for _, pq := range pqs {
@@ -520,19 +708,16 @@ func projectAllocations(tx *gorm.DB, orgId uuid.UUID, pqs []model.ProjectQuota) 
 	if err := tx.Where("project_id IN (?)", liveProjectIds(tx, orgId)).Order("project_id, code_az").Find(&azqs).Error; err != nil {
 		return nil, err
 	}
-	azOnly := map[uuid.UUID]spxQuota.Quantities{}
+	azSums := map[uuid.UUID]spxQuota.Quantities{}
 	for _, azq := range azqs {
-		if _, ok := allocations[azq.ProjectId]; ok {
-			continue
-		}
 		parsed, err := azq.Resources.Parse()
 		if err != nil {
 			return nil, err
 		}
-		azOnly[azq.ProjectId] = azOnly[azq.ProjectId].Add(parsed)
+		azSums[azq.ProjectId] = azSums[azq.ProjectId].Add(parsed)
 	}
-	for projectId, q := range azOnly {
-		allocations[projectId] = q
+	for projectId, q := range azSums {
+		allocations[projectId] = allocations[projectId].Max(q)
 	}
 	return allocations, nil
 }

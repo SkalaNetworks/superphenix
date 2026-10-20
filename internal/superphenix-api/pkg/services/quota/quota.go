@@ -187,8 +187,14 @@ func WriteError(w http.ResponseWriter, r *http.Request, err error, msg string) {
 	switch {
 	case errors.Is(err, crudQuota.ErrInvalidQuantity),
 		errors.Is(err, crudQuota.ErrOrgQuotaExceeded),
-		errors.Is(err, crudQuota.ErrProjectQuotaExceeded):
+		errors.Is(err, crudQuota.ErrProjectQuotaExceeded),
+		errors.Is(err, crudQuota.ErrBelowAllocated),
+		errors.Is(err, crudQuota.ErrBelowUsage):
 		status = http.StatusBadRequest
+	case errors.Is(err, crudQuota.ErrUsageUnavailable),
+		errors.Is(err, crudQuota.ErrAZUnavailable):
+		// Logged by the crud layer; the message only holds the AZ code and resource name.
+		status = http.StatusServiceUnavailable
 	case errors.Is(err, crudQuota.ErrOrganizationNotFound),
 		errors.Is(err, crudQuota.ErrProjectNotFound),
 		errors.Is(err, crudQuota.ErrAZNotFound):

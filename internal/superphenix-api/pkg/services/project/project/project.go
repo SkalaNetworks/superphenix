@@ -210,7 +210,11 @@ func RemoveProject(ctx context.Context, orgaId, projectId string) error {
 }
 
 // InitializeProject create a new project into the database, and init the associated permissions
+//
+// It is not canceled with ctx: a client disconnecting halfway must not leave a project created
+// in the database without its permissions or its quota.
 func InitializeProject(ctx context.Context, userId, orgaId uuid.UUID, name string) (model.APIProject, error) {
+	ctx = context.WithoutCancel(ctx)
 	log := logger.GetLogger(ctx)
 	projectEntity, err := project.CreateProject(ctx, orgaId, name)
 	if err != nil {

@@ -137,7 +137,7 @@ func TestAdminDeleteOrganizationQuota(t *testing.T) {
 		// Applied on every AZ: a project deactivated by a failed quota push is reactivated.
 		mock.ExpectBegin()
 		mock.ExpectExec(regexp.QuoteMeta(`DELETE FROM "project_deactivations" WHERE project_id = $1 AND reason = $2`)).
-			WithArgs(projectID, "quota").WillReturnResult(sqlmock.NewResult(0, 0))
+			WithArgs(projectID, "quotaFailedToApply").WillReturnResult(sqlmock.NewResult(0, 0))
 		mock.ExpectCommit()
 
 		rr := httptest.NewRecorder()

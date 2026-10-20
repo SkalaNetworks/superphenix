@@ -59,7 +59,7 @@ func Project(ctx context.Context, orgId, projectId uuid.UUID, azCodes ...string)
 		return fmt.Errorf("%w: %s", ErrNotApplied, strings.Join(failed, ", "))
 	}
 	if len(azCodes) == 0 {
-		if err := crudProject.Reactivate(ctx, projectId, model.DeactivationQuota); err != nil {
+		if err := crudProject.Reactivate(ctx, projectId, model.DeactivationQuotaFailedToApply); err != nil {
 			return err
 		}
 	}
@@ -90,7 +90,7 @@ func Initialize(ctx context.Context, orgId, projectId uuid.UUID) error {
 		if len(unenforced) > 0 {
 			msg += " on: " + strings.Join(unenforced, ", ")
 		}
-		if errDeactivate := crudProject.Deactivate(ctx, projectId, model.DeactivationQuota, msg); errDeactivate != nil {
+		if errDeactivate := crudProject.Deactivate(ctx, projectId, model.DeactivationQuotaFailedToApply, msg); errDeactivate != nil {
 			return errors.Join(err, errDeactivate)
 		}
 	}

@@ -57,7 +57,7 @@ func TestCheckProjectActive(t *testing.T) {
 	t.Run("deactivated project", func(t *testing.T) {
 		mock, r := setup(t)
 		mock.ExpectQuery(sqlDeactivations).WithArgs(projectID, orgID).
-			WillReturnRows(sqlmock.NewRows([]string{"project_id", "reason", "message"}).AddRow(projectID, "quota", "quota not applied on: az1"))
+			WillReturnRows(sqlmock.NewRows([]string{"project_id", "reason", "message"}).AddRow(projectID, "quotaFailedToApply", "quota not applied on: az1"))
 		assert.Equal(t, http.StatusLocked, serve(r, projectPath))
 	})
 

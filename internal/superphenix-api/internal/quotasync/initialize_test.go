@@ -85,7 +85,7 @@ func TestInitialize(t *testing.T) {
 		expectHierarchy(mock, orgID, `{"cpu":"8"}`)
 		mock.ExpectBegin()
 		mock.ExpectExec(sqlDeactivate).
-			WithArgs(projectID, "quota", "quota not applied on: az1", sqlmock.AnyArg(), sqlmock.AnyArg()).
+			WithArgs(projectID, "quotaFailedToApply", "quota not applied on: az1", sqlmock.AnyArg(), sqlmock.AnyArg()).
 			WillReturnResult(sqlmock.NewResult(1, 1))
 		mock.ExpectCommit()
 
@@ -121,7 +121,7 @@ func TestProjectReactivates(t *testing.T) {
 		mock := setupMockDB(t)
 		expectHierarchy(mock, orgID, `{"cpu":"8"}`)
 		mock.ExpectBegin()
-		mock.ExpectExec(sqlReactivate).WithArgs(projectID, "quota").WillReturnResult(sqlmock.NewResult(0, 1))
+		mock.ExpectExec(sqlReactivate).WithArgs(projectID, "quotaFailedToApply").WillReturnResult(sqlmock.NewResult(0, 1))
 		mock.ExpectCommit()
 
 		require.NoError(t, Project(context.Background(), orgID, projectID))

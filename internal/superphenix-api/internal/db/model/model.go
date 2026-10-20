@@ -113,8 +113,8 @@ type Project struct {
 // Deactivation reasons. Each feature that needs to block a project uses its own reason, so
 // that lifting one does not reactivate a project another feature still blocks.
 const (
-	// DeactivationQuota: the quota of the project could not be applied on every AZ.
-	DeactivationQuota = "quota"
+	// DeactivationQuotaFailedToApply: the quota of the project could not be applied on every AZ.
+	DeactivationQuotaFailedToApply = "quotaFailedToApply"
 )
 
 // ProjectDeactivation blocks every operation on the resources of a project, while the

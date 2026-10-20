@@ -475,11 +475,43 @@ func DeleteProjectQuota(ctx context.Context, orgId, projectId uuid.UUID) error {
 		if oq != nil {
 			return ErrProjectQuotaEnforced
 		}
-		if err := tx.Unscoped().Where("project_id = ?", projectId).Delete(&model.ProjectAZQuota{}).Error; err != nil {
-			return err
-		}
-		return tx.Unscoped().Where("project_id = ?", projectId).Delete(&model.ProjectQuota{}).Error
+		return deleteProjectRows(tx, projectId)
 	})
+}
+
+// DeleteForProject removes, within tx, the quota rows of a project being deleted (its project
+// quota and AZ quotas), under the organization lock so that no quota write of the project runs
+// concurrently. The ResourceQuotas in the AZs are left to the garbage collector.
+func DeleteForProject(tx *gorm.DB, orgId, projectId uuid.UUID) error {
+	if err := lockOrganization(tx, orgId); err != nil {
+		return err
+	}
+	return deleteProjectRows(tx, projectId)
+}
+
+// deleteProjectRows hard-deletes the project quota and the AZ quotas of a project.
+func deleteProjectRows(tx *gorm.DB, projectId uuid.UUID) error {
+	if err := tx.Unscoped().Where("project_id = ?", projectId).Delete(&model.ProjectAZQuota{}).Error; err != nil {
+		return err
+	}
+	return tx.Unscoped().Where("project_id = ?", projectId).Delete(&model.ProjectQuota{}).Error
+}
+
+// DeleteForOrganization removes, within tx, the quota rows of an organization being deleted: its
+// organization quota and the project and AZ quotas of all its projects (deleted ones included),
+// under the organization lock. The ResourceQuotas in the AZs are left to the garbage collector.
+func DeleteForOrganization(tx *gorm.DB, orgId uuid.UUID) error {
+	if err := lockOrganization(tx, orgId); err != nil {
+		return err
+	}
+	allProjectIds := tx.Session(&gorm.Session{NewDB: true}).Unscoped().Model(&model.Project{}).Select("id").Where("orga_id = ?", orgId)
+	if err := tx.Unscoped().Where("project_id IN (?)", allProjectIds).Delete(&model.ProjectAZQuota{}).Error; err != nil {
+		return err
+	}
+	if err := tx.Unscoped().Where("organization_id = ?", orgId).Delete(&model.ProjectQuota{}).Error; err != nil {
+		return err
+	}
+	return tx.Unscoped().Where("organization_id = ?", orgId).Delete(&model.OrganizationQuota{}).Error
 }
 
 // checkCapacity checks that a child quota (requested, replacing current) fits in the parent

@@ -47,7 +47,6 @@ func TestGetProjectUsage(t *testing.T) {
 	assert.Equal(t, model.QuotaResources{"cpu": "3", "memory": "1Gi", "disk": "10Gi"}, usage.Used)
 	assert.Len(t, usage.AZs, 2)
 	assert.Equal(t, model.QuotaResources{"cpu": "2500m", "memory": "1Gi"}, usage.AZs[0].Used)
-	assert.Equal(t, "2500m", usage.AZs[0].KubernetesUsed["limits.cpu"])
 
 	// An unreachable AZ is reported as unavailable, the others are still summed.
 	config.Global.AZs["az2"] = config.AZConfig{Code: "az2", ControllerUrl: down.URL, AuthSecret: "secret"}

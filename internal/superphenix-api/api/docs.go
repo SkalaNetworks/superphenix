@@ -1539,6 +1539,442 @@ const docTemplate = `{
                 }
             }
         },
+        "/v1/organization/{orgaId}/project/{projectId}/quota": {
+            "get": {
+                "security": [
+                    {
+                        "Bearer": [
+                            "OrganizationRead",
+                            "ProjectAZQuotaRead"
+                        ]
+                    }
+                ],
+                "description": "Get the quota of a project and its AZ quotas",
+                "produces": [
+                    "application/json"
+                ],
+                "tags": [
+                    "v1",
+                    "quota"
+                ],
+                "summary": "Get the project quota",
+                "parameters": [
+                    {
+                        "type": "string",
+                        "description": "Organization ID",
+                        "name": "orgaId",
+                        "in": "path",
+                        "required": true
+                    },
+                    {
+                        "type": "string",
+                        "description": "Project ID",
+                        "name": "projectId",
+                        "in": "path",
+                        "required": true
+                    }
+                ],
+                "responses": {
+                    "200": {
+                        "description": "Project quota",
+                        "schema": {
+                            "$ref": "#/definitions/quota.ProjectQuotaOverview"
+                        }
+                    },
+                    "400": {
+                        "description": "Bad Request"
+                    },
+                    "403": {
+                        "description": "Forbidden"
+                    },
+                    "404": {
+                        "description": "Not Found"
+                    },
+                    "500": {
+                        "description": "Internal Server Error"
+                    }
+                }
+            },
+            "put": {
+                "security": [
+                    {
+                        "Bearer": [
+                            "OrganizationRead",
+                            "OrganizationProjectQuotaWrite"
+                        ]
+                    }
+                ],
+                "description": "Set (replace) the quota of a project and apply it to every AZ. Allowed resources: cpu, memory, disk. It must fit in the organization quota and cannot be lower than the sum of its AZ quotas. It is split equally among the AZs only when the project has no AZ quota yet.",
+                "consumes": [
+                    "application/json"
+                ],
+                "produces": [
+                    "application/json"
+                ],
+                "tags": [
+                    "v1",
+                    "quota"
+                ],
+                "summary": "Set the project quota",
+                "parameters": [
+                    {
+                        "type": "string",
+                        "description": "Organization ID",
+                        "name": "orgaId",
+                        "in": "path",
+                        "required": true
+                    },
+                    {
+                        "type": "string",
+                        "description": "Project ID",
+                        "name": "projectId",
+                        "in": "path",
+                        "required": true
+                    },
+                    {
+                        "description": "Quota, e.g. {\\",
+                        "name": "Body",
+                        "in": "body",
+                        "required": true,
+                        "schema": {
+                            "type": "object",
+                            "additionalProperties": {
+                                "type": "string"
+                            }
+                        }
+                    }
+                ],
+                "responses": {
+                    "200": {
+                        "description": "Project quota",
+                        "schema": {
+                            "$ref": "#/definitions/model.ProjectQuota"
+                        }
+                    },
+                    "400": {
+                        "description": "Invalid quota, exceeds the organization quota or below the AZ quotas"
+                    },
+                    "403": {
+                        "description": "Forbidden"
+                    },
+                    "404": {
+                        "description": "Not Found"
+                    },
+                    "413": {
+                        "description": "Request Entity Too Large"
+                    },
+                    "415": {
+                        "description": "Unsupported Media Type"
+                    },
+                    "500": {
+                        "description": "Internal Server Error"
+                    },
+                    "502": {
+                        "description": "Saved but not applied on some AZs (retry to apply it again)"
+                    }
+                }
+            },
+            "delete": {
+                "security": [
+                    {
+                        "Bearer": [
+                            "OrganizationRead",
+                            "OrganizationProjectQuotaWrite"
+                        ]
+                    }
+                ],
+                "description": "Delete the quota and AZ quotas of a project and apply it to every AZ. Refused while the organization has a quota.",
+                "tags": [
+                    "v1",
+                    "quota"
+                ],
+                "summary": "Delete the project quota",
+                "parameters": [
+                    {
+                        "type": "string",
+                        "description": "Organization ID",
+                        "name": "orgaId",
+                        "in": "path",
+                        "required": true
+                    },
+                    {
+                        "type": "string",
+                        "description": "Project ID",
+                        "name": "projectId",
+                        "in": "path",
+                        "required": true
+                    }
+                ],
+                "responses": {
+                    "204": {
+                        "description": "No Content"
+                    },
+                    "400": {
+                        "description": "Bad Request"
+                    },
+                    "403": {
+                        "description": "Forbidden"
+                    },
+                    "404": {
+                        "description": "Not Found"
+                    },
+                    "409": {
+                        "description": "The organization has a quota"
+                    },
+                    "500": {
+                        "description": "Internal Server Error"
+                    },
+                    "502": {
+                        "description": "Deleted but not applied on some AZs (retry to apply it again)"
+                    }
+                }
+            }
+        },
+        "/v1/organization/{orgaId}/project/{projectId}/quota/az/{codeAZ}": {
+            "put": {
+                "security": [
+                    {
+                        "Bearer": [
+                            "OrganizationRead",
+                            "ProjectAZQuotaWrite"
+                        ]
+                    }
+                ],
+                "description": "Set (replace) the quota of a project in one AZ and apply it. Allowed resources: cpu, memory, disk. It must fit in the project quota (or the organization quota when the project has none) and cannot be lowered below what the project currently uses in the AZ.",
+                "consumes": [
+                    "application/json"
+                ],
+                "produces": [
+                    "application/json"
+                ],
+                "tags": [
+                    "v1",
+                    "quota"
+                ],
+                "summary": "Set the project AZ quota",
+                "parameters": [
+                    {
+                        "type": "string",
+                        "description": "Organization ID",
+                        "name": "orgaId",
+                        "in": "path",
+                        "required": true
+                    },
+                    {
+                        "type": "string",
+                        "description": "Project ID",
+                        "name": "projectId",
+                        "in": "path",
+                        "required": true
+                    },
+                    {
+                        "type": "string",
+                        "description": "AZ code",
+                        "name": "codeAZ",
+                        "in": "path",
+                        "required": true
+                    },
+                    {
+                        "description": "Quota, e.g. {\\",
+                        "name": "Body",
+                        "in": "body",
+                        "required": true,
+                        "schema": {
+                            "type": "object",
+                            "additionalProperties": {
+                                "type": "string"
+                            }
+                        }
+                    }
+                ],
+                "responses": {
+                    "200": {
+                        "description": "Project AZ quota",
+                        "schema": {
+                            "$ref": "#/definitions/model.ProjectAZQuota"
+                        }
+                    },
+                    "400": {
+                        "description": "Invalid quota, exceeds the parent quota or below the current usage"
+                    },
+                    "403": {
+                        "description": "Forbidden"
+                    },
+                    "404": {
+                        "description": "Not Found"
+                    },
+                    "413": {
+                        "description": "Request Entity Too Large"
+                    },
+                    "415": {
+                        "description": "Unsupported Media Type"
+                    },
+                    "500": {
+                        "description": "Internal Server Error"
+                    },
+                    "502": {
+                        "description": "Saved but not applied on the AZ (retry to apply it again)"
+                    },
+                    "503": {
+                        "description": "AZ or its usage unavailable, nothing changed"
+                    }
+                }
+            }
+        },
+        "/v1/organization/{orgaId}/project/{projectId}/quota/usage": {
+            "get": {
+                "security": [
+                    {
+                        "Bearer": [
+                            "OrganizationRead",
+                            "ProjectAZQuotaRead"
+                        ]
+                    }
+                ],
+                "description": "Get what the project currently uses (ResourceQuota status.used), per AZ and summed. An AZ that cannot be read is returned with available=false and makes the total incomplete (complete=false).",
+                "produces": [
+                    "application/json"
+                ],
+                "tags": [
+                    "v1",
+                    "quota"
+                ],
+                "summary": "Get the project quota usage",
+                "parameters": [
+                    {
+                        "type": "string",
+                        "description": "Organization ID",
+                        "name": "orgaId",
+                        "in": "path",
+                        "required": true
+                    },
+                    {
+                        "type": "string",
+                        "description": "Project ID",
+                        "name": "projectId",
+                        "in": "path",
+                        "required": true
+                    }
+                ],
+                "responses": {
+                    "200": {
+                        "description": "Project usage",
+                        "schema": {
+                            "$ref": "#/definitions/quotasync.ProjectUsage"
+                        }
+                    },
+                    "400": {
+                        "description": "Bad Request"
+                    },
+                    "403": {
+                        "description": "Forbidden"
+                    },
+                    "404": {
+                        "description": "Not Found"
+                    },
+                    "500": {
+                        "description": "Internal Server Error"
+                    }
+                }
+            }
+        },
+        "/v1/organization/{orgaId}/quota": {
+            "get": {
+                "security": [
+                    {
+                        "Bearer": [
+                            "OrganizationRead",
+                            "OrganizationProjectQuotaRead"
+                        ]
+                    }
+                ],
+                "description": "Get the quota of an organization (unlimited when not defined), what is allocated to its projects and what remains",
+                "produces": [
+                    "application/json"
+                ],
+                "tags": [
+                    "v1",
+                    "quota"
+                ],
+                "summary": "Get the organization quota",
+                "parameters": [
+                    {
+                        "type": "string",
+                        "description": "Organization ID",
+                        "name": "orgaId",
+                        "in": "path",
+                        "required": true
+                    }
+                ],
+                "responses": {
+                    "200": {
+                        "description": "Organization quota",
+                        "schema": {
+                            "$ref": "#/definitions/quota.OrganizationQuotaOverview"
+                        }
+                    },
+                    "400": {
+                        "description": "Bad Request"
+                    },
+                    "403": {
+                        "description": "Forbidden"
+                    },
+                    "404": {
+                        "description": "Not Found"
+                    },
+                    "500": {
+                        "description": "Internal Server Error"
+                    }
+                }
+            }
+        },
+        "/v1/organization/{orgaId}/quota/usage": {
+            "get": {
+                "security": [
+                    {
+                        "Bearer": [
+                            "OrganizationRead",
+                            "OrganizationProjectQuotaRead"
+                        ]
+                    }
+                ],
+                "description": "Get what the organization currently uses (ResourceQuota status.used), per project and AZ and summed. An AZ that cannot be read is returned with available=false and makes the totals incomplete (complete=false).",
+                "produces": [
+                    "application/json"
+                ],
+                "tags": [
+                    "v1",
+                    "quota"
+                ],
+                "summary": "Get the organization quota usage",
+                "parameters": [
+                    {
+                        "type": "string",
+                        "description": "Organization ID",
+                        "name": "orgaId",
+                        "in": "path",
+                        "required": true
+                    }
+                ],
+                "responses": {
+                    "200": {
+                        "description": "Organization usage",
+                        "schema": {
+                            "$ref": "#/definitions/quotasync.OrganizationUsage"
+                        }
+                    },
+                    "400": {
+                        "description": "Bad Request"
+                    },
+                    "403": {
+                        "description": "Forbidden"
+                    },
+                    "500": {
+                        "description": "Internal Server Error"
+                    }
+                }
+            }
+        },
         "/v1/organization/{orgaId}/transfer": {
             "post": {
                 "security": [
@@ -10141,6 +10577,13 @@ const docTemplate = `{
         "model.APIProject": {
             "type": "object",
             "properties": {
+                "deactivations": {
+                    "description": "Deactivations is empty when the project is active. Otherwise, every operation on the\nresources of the project is refused until each cause is lifted.",
+                    "type": "array",
+                    "items": {
+                        "$ref": "#/definitions/model.APIProjectDeactivation"
+                    }
+                },
                 "id": {
                     "type": "string"
                 },
@@ -10148,6 +10591,20 @@ const docTemplate = `{
                     "type": "string"
                 },
                 "orgaId": {
+                    "type": "string"
+                }
+            }
+        },
+        "model.APIProjectDeactivation": {
+            "type": "object",
+            "properties": {
+                "createdAt": {
+                    "type": "string"
+                },
+                "message": {
+                    "type": "string"
+                },
+                "reason": {
                     "type": "string"
                 }
             }
@@ -10346,6 +10803,13 @@ const docTemplate = `{
                 "createdAt": {
                     "type": "string"
                 },
+                "deactivations": {
+                    "description": "Deactivations lists why the project is deactivated. A project is active when empty.",
+                    "type": "array",
+                    "items": {
+                        "$ref": "#/definitions/model.ProjectDeactivation"
+                    }
+                },
                 "deletedAt": {
                     "$ref": "#/definitions/gorm.DeletedAt"
                 },
@@ -10361,6 +10825,81 @@ const docTemplate = `{
                 "updatedAt": {
                     "type": "string"
                 }
+            }
+        },
+        "model.ProjectAZQuota": {
+            "type": "object",
+            "properties": {
+                "codeAZ": {
+                    "type": "string"
+                },
+                "createdAt": {
+                    "type": "string"
+                },
+                "deletedAt": {
+                    "$ref": "#/definitions/gorm.DeletedAt"
+                },
+                "id": {
+                    "type": "string"
+                },
+                "projectId": {
+                    "type": "string"
+                },
+                "resources": {
+                    "$ref": "#/definitions/model.QuotaResources"
+                },
+                "updatedAt": {
+                    "type": "string"
+                }
+            }
+        },
+        "model.ProjectDeactivation": {
+            "type": "object",
+            "properties": {
+                "createdAt": {
+                    "type": "string"
+                },
+                "message": {
+                    "type": "string"
+                },
+                "projectId": {
+                    "type": "string"
+                },
+                "reason": {
+                    "type": "string"
+                },
+                "updatedAt": {
+                    "type": "string"
+                }
+            }
+        },
+        "model.ProjectQuota": {
+            "type": "object",
+            "properties": {
+                "createdAt": {
+                    "type": "string"
+                },
+                "deletedAt": {
+                    "$ref": "#/definitions/gorm.DeletedAt"
+                },
+                "organizationId": {
+                    "type": "string"
+                },
+                "projectId": {
+                    "type": "string"
+                },
+                "resources": {
+                    "$ref": "#/definitions/model.QuotaResources"
+                },
+                "updatedAt": {
+                    "type": "string"
+                }
+            }
+        },
+        "model.QuotaResources": {
+            "type": "object",
+            "additionalProperties": {
+                "type": "string"
             }
         },
         "model.User": {
@@ -10544,6 +11083,109 @@ const docTemplate = `{
                 "name": {
                     "type": "string",
                     "maxLength": 63
+                }
+            }
+        },
+        "quota.OrganizationQuotaOverview": {
+            "type": "object",
+            "properties": {
+                "allocated": {
+                    "$ref": "#/definitions/model.QuotaResources"
+                },
+                "organizationId": {
+                    "type": "string"
+                },
+                "projectQuotas": {
+                    "type": "array",
+                    "items": {
+                        "$ref": "#/definitions/model.ProjectQuota"
+                    }
+                },
+                "remaining": {
+                    "$ref": "#/definitions/model.QuotaResources"
+                },
+                "resources": {
+                    "$ref": "#/definitions/model.QuotaResources"
+                },
+                "unlimited": {
+                    "type": "boolean"
+                }
+            }
+        },
+        "quota.ProjectQuotaOverview": {
+            "type": "object",
+            "properties": {
+                "azQuotas": {
+                    "type": "array",
+                    "items": {
+                        "$ref": "#/definitions/model.ProjectAZQuota"
+                    }
+                },
+                "organizationId": {
+                    "type": "string"
+                },
+                "projectId": {
+                    "type": "string"
+                },
+                "resources": {
+                    "$ref": "#/definitions/model.QuotaResources"
+                }
+            }
+        },
+        "quotasync.AZUsage": {
+            "type": "object",
+            "properties": {
+                "available": {
+                    "description": "Available is false when the AZ controller could not be reached: Used is then empty.",
+                    "type": "boolean"
+                },
+                "codeAZ": {
+                    "type": "string"
+                },
+                "used": {
+                    "$ref": "#/definitions/model.QuotaResources"
+                }
+            }
+        },
+        "quotasync.OrganizationUsage": {
+            "type": "object",
+            "properties": {
+                "complete": {
+                    "description": "Complete is false when the usage of at least one project is incomplete.",
+                    "type": "boolean"
+                },
+                "organizationId": {
+                    "type": "string"
+                },
+                "projects": {
+                    "type": "array",
+                    "items": {
+                        "$ref": "#/definitions/quotasync.ProjectUsage"
+                    }
+                },
+                "used": {
+                    "$ref": "#/definitions/model.QuotaResources"
+                }
+            }
+        },
+        "quotasync.ProjectUsage": {
+            "type": "object",
+            "properties": {
+                "azs": {
+                    "type": "array",
+                    "items": {
+                        "$ref": "#/definitions/quotasync.AZUsage"
+                    }
+                },
+                "complete": {
+                    "description": "Complete is false when the usage of at least one AZ is unavailable (Used then misses it).",
+                    "type": "boolean"
+                },
+                "projectId": {
+                    "type": "string"
+                },
+                "used": {
+                    "$ref": "#/definitions/model.QuotaResources"
                 }
             }
         },
@@ -11098,6 +11740,9 @@ const docTemplate = `{
                     "items": {
                         "$ref": "#/definitions/summary.RecentProduct"
                     }
+                },
+                "resources": {
+                    "$ref": "#/definitions/model.QuotaResources"
                 }
             }
         },

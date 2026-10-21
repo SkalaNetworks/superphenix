@@ -44,8 +44,6 @@ type AZUsage struct {
 	// Available is false when the AZ controller could not be reached: Used is then empty.
 	Available bool                 `json:"available"`
 	Used      model.QuotaResources `json:"used"`
-	// KubernetesUsed is the raw `status.used` of the ResourceQuota (e.g. requests.cpu and limits.cpu).
-	KubernetesUsed map[string]string `json:"kubernetesUsed,omitempty"`
 }
 
 // ProjectUsage is what a project currently uses, per AZ and summed over its AZs.
@@ -139,7 +137,6 @@ func projectUsage(ctx context.Context, orgId, projectId uuid.UUID, azs []config.
 			used := spxQuota.FromKubernetesUsage(status.Used)
 			azUsage.Available = true
 			azUsage.Used = used.Resources()
-			azUsage.KubernetesUsed = status.Used
 			total = total.Add(used)
 		}
 		usage.AZs = append(usage.AZs, azUsage)

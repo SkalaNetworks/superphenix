@@ -20,6 +20,19 @@ import (
 const maxBodySizeMB = 1
 
 // GetOrganizationQuota handles GET /organization/{orgaId}/quota
+//
+//	@Summary		Get the organization quota
+//	@Description	Get the quota of an organization (unlimited when not defined), what is allocated to its projects and what remains
+//	@Tags			v1, quota
+//	@Produce		json
+//	@Param			orgaId	path		string								true	"Organization ID"
+//	@Success		200		{object}	crudQuota.OrganizationQuotaOverview	"Organization quota"
+//	@Failure		400
+//	@Failure		403
+//	@Failure		404
+//	@Failure		500
+//	@Router			/v1/organization/{orgaId}/quota [get]
+//	@Security		Bearer[OrganizationRead, OrganizationProjectQuotaRead]
 func (h *Service) GetOrganizationQuota(w http.ResponseWriter, r *http.Request) {
 	orgID, ok := ParseID(w, r, "orgaId")
 	if !ok {
@@ -34,6 +47,20 @@ func (h *Service) GetOrganizationQuota(w http.ResponseWriter, r *http.Request) {
 }
 
 // GetProjectQuota handles GET /organization/{orgaId}/project/{projectId}/quota
+//
+//	@Summary		Get the project quota
+//	@Description	Get the quota of a project and its AZ quotas
+//	@Tags			v1, quota
+//	@Produce		json
+//	@Param			orgaId		path		string							true	"Organization ID"
+//	@Param			projectId	path		string							true	"Project ID"
+//	@Success		200			{object}	crudQuota.ProjectQuotaOverview	"Project quota"
+//	@Failure		400
+//	@Failure		403
+//	@Failure		404
+//	@Failure		500
+//	@Router			/v1/organization/{orgaId}/project/{projectId}/quota [get]
+//	@Security		Bearer[OrganizationRead, ProjectAZQuotaRead]
 func (h *Service) GetProjectQuota(w http.ResponseWriter, r *http.Request) {
 	orgID, projID, ok := parseOrgAndProject(w, r)
 	if !ok {
@@ -48,6 +75,18 @@ func (h *Service) GetProjectQuota(w http.ResponseWriter, r *http.Request) {
 }
 
 // GetOrganizationQuotaUsage handles GET /organization/{orgaId}/quota/usage
+//
+//	@Summary		Get the organization quota usage
+//	@Description	Get what the organization currently uses (ResourceQuota status.used), per project and AZ and summed. An AZ that cannot be read is returned with available=false and makes the totals incomplete (complete=false).
+//	@Tags			v1, quota
+//	@Produce		json
+//	@Param			orgaId	path		string						true	"Organization ID"
+//	@Success		200		{object}	quotasync.OrganizationUsage	"Organization usage"
+//	@Failure		400
+//	@Failure		403
+//	@Failure		500
+//	@Router			/v1/organization/{orgaId}/quota/usage [get]
+//	@Security		Bearer[OrganizationRead, OrganizationProjectQuotaRead]
 func (h *Service) GetOrganizationQuotaUsage(w http.ResponseWriter, r *http.Request) {
 	WriteOrganizationUsage(w, r)
 }
@@ -68,6 +107,20 @@ func WriteOrganizationUsage(w http.ResponseWriter, r *http.Request) {
 }
 
 // GetProjectQuotaUsage handles GET /organization/{orgaId}/project/{projectId}/quota/usage
+//
+//	@Summary		Get the project quota usage
+//	@Description	Get what the project currently uses (ResourceQuota status.used), per AZ and summed. An AZ that cannot be read is returned with available=false and makes the total incomplete (complete=false).
+//	@Tags			v1, quota
+//	@Produce		json
+//	@Param			orgaId		path		string					true	"Organization ID"
+//	@Param			projectId	path		string					true	"Project ID"
+//	@Success		200			{object}	quotasync.ProjectUsage	"Project usage"
+//	@Failure		400
+//	@Failure		403
+//	@Failure		404
+//	@Failure		500
+//	@Router			/v1/organization/{orgaId}/project/{projectId}/quota/usage [get]
+//	@Security		Bearer[OrganizationRead, ProjectAZQuotaRead]
 func (h *Service) GetProjectQuotaUsage(w http.ResponseWriter, r *http.Request) {
 	orgID, projID, ok := parseOrgAndProject(w, r)
 	if !ok {
@@ -81,6 +134,25 @@ func (h *Service) GetProjectQuotaUsage(w http.ResponseWriter, r *http.Request) {
 }
 
 // SetProjectQuota handles PUT /organization/{orgaId}/project/{projectId}/quota
+//
+//	@Summary		Set the project quota
+//	@Description	Set (replace) the quota of a project and apply it to every AZ. Allowed resources: cpu, memory, disk. It must fit in the organization quota and cannot be lower than the sum of its AZ quotas. It is split equally among the AZs only when the project has no AZ quota yet.
+//	@Tags			v1, quota
+//	@Accept			json
+//	@Produce		json
+//	@Param			orgaId		path		string				true	"Organization ID"
+//	@Param			projectId	path		string				true	"Project ID"
+//	@Param			Body		body		map[string]string	true	"Quota, e.g. {\"cpu\": \"16\", \"memory\": \"64Gi\", \"disk\": \"1Ti\"}"
+//	@Success		200			{object}	model.ProjectQuota	"Project quota"
+//	@Failure		400			"Invalid quota, exceeds the organization quota or below the AZ quotas"
+//	@Failure		403
+//	@Failure		404
+//	@Failure		413
+//	@Failure		415
+//	@Failure		500
+//	@Failure		502	"Saved but not applied on some AZs (retry to apply it again)"
+//	@Router			/v1/organization/{orgaId}/project/{projectId}/quota [put]
+//	@Security		Bearer[OrganizationRead, OrganizationProjectQuotaWrite]
 func (h *Service) SetProjectQuota(w http.ResponseWriter, r *http.Request) {
 	orgID, projID, ok := parseOrgAndProject(w, r)
 	if !ok {
@@ -103,6 +175,27 @@ func (h *Service) SetProjectQuota(w http.ResponseWriter, r *http.Request) {
 }
 
 // SetProjectAZQuota handles PUT /organization/{orgaId}/project/{projectId}/quota/az/{codeAZ}
+//
+//	@Summary		Set the project AZ quota
+//	@Description	Set (replace) the quota of a project in one AZ and apply it. Allowed resources: cpu, memory, disk. It must fit in the project quota (or the organization quota when the project has none) and cannot be lowered below what the project currently uses in the AZ.
+//	@Tags			v1, quota
+//	@Accept			json
+//	@Produce		json
+//	@Param			orgaId		path		string					true	"Organization ID"
+//	@Param			projectId	path		string					true	"Project ID"
+//	@Param			codeAZ		path		string					true	"AZ code"
+//	@Param			Body		body		map[string]string		true	"Quota, e.g. {\"cpu\": \"8\", \"memory\": \"32Gi\", \"disk\": \"500Gi\"}"
+//	@Success		200			{object}	model.ProjectAZQuota	"Project AZ quota"
+//	@Failure		400			"Invalid quota, exceeds the parent quota or below the current usage"
+//	@Failure		403
+//	@Failure		404
+//	@Failure		413
+//	@Failure		415
+//	@Failure		500
+//	@Failure		502	"Saved but not applied on the AZ (retry to apply it again)"
+//	@Failure		503	"AZ or its usage unavailable, nothing changed"
+//	@Router			/v1/organization/{orgaId}/project/{projectId}/quota/az/{codeAZ} [put]
+//	@Security		Bearer[OrganizationRead, ProjectAZQuotaWrite]
 func (h *Service) SetProjectAZQuota(w http.ResponseWriter, r *http.Request) {
 	orgID, projID, ok := parseOrgAndProject(w, r)
 	if !ok {
@@ -126,6 +219,21 @@ func (h *Service) SetProjectAZQuota(w http.ResponseWriter, r *http.Request) {
 }
 
 // DeleteProjectQuota handles DELETE /organization/{orgaId}/project/{projectId}/quota
+//
+//	@Summary		Delete the project quota
+//	@Description	Delete the quota and AZ quotas of a project and apply it to every AZ. Refused while the organization has a quota.
+//	@Tags			v1, quota
+//	@Param			orgaId		path	string	true	"Organization ID"
+//	@Param			projectId	path	string	true	"Project ID"
+//	@Success		204
+//	@Failure		400
+//	@Failure		403
+//	@Failure		404
+//	@Failure		409	"The organization has a quota"
+//	@Failure		500
+//	@Failure		502	"Deleted but not applied on some AZs (retry to apply it again)"
+//	@Router			/v1/organization/{orgaId}/project/{projectId}/quota [delete]
+//	@Security		Bearer[OrganizationRead, OrganizationProjectQuotaWrite]
 func (h *Service) DeleteProjectQuota(w http.ResponseWriter, r *http.Request) {
 	orgID, projID, ok := parseOrgAndProject(w, r)
 	if !ok {

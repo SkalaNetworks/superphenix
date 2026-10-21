@@ -49,9 +49,9 @@ func QuotaEndpoint(router chi.Router) {
 //	@Description	Get the limits and the usage of the ResourceQuota of the project in this AZ. Both are empty when there is none.
 //	@Tags			v1, Quota
 //	@Produce		json
-//	@Param			orgId		path	string	true	"Organization ID"
-//	@Param			projectId	path	string	true	"Project ID"
-//	@Success		200	{object}	QuotaStatus
+//	@Param			orgId		path		string	true	"Organization ID"
+//	@Param			projectId	path		string	true	"Project ID"
+//	@Success		200			{object}	QuotaStatus
 //	@Failure		400
 //	@Failure		500
 //	@Router			/{orgId}/{projectId}/quota [get]

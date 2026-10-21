@@ -290,6 +290,30 @@ func TestSetOrganizationQuota(t *testing.T) {
 		require.NoError(t, err)
 	})
 
+	t.Run("project quotas get what their AZ quotas hold of a newly limited resource", func(t *testing.T) {
+		mock := setupMockDB(t)
+
+		mock.ExpectBegin()
+		expectLockOrg(mock, orgID)
+		// proj1 does not limit memory, proj2 has no project quota: both hold some in their AZs.
+		expectListPQs(mock, orgID, [2]any{proj1, `{"cpu":"4"}`})
+		expectOrgAZQs(mock, orgID,
+			[3]any{proj1, "az-1", `{"cpu":"4","memory":"2Gi"}`},
+			[3]any{proj2, "az-1", `{"memory":"1Gi","disk":"1Gi"}`})
+		first, second := proj1, proj2
+		firstRes, secondRes := `{"cpu":"4","memory":"2Gi"}`, `{"memory":"1Gi"}`
+		if proj2.String() < proj1.String() {
+			first, second, firstRes, secondRes = proj2, proj1, secondRes, firstRes
+		}
+		expectUpsertPQ(mock, orgID, first, firstRes)
+		expectUpsertPQ(mock, orgID, second, secondRes)
+		mock.ExpectExec(sqlUpsertOQ).WillReturnResult(sqlmock.NewResult(1, 1))
+		mock.ExpectCommit()
+
+		_, err := SetOrganizationQuota(context.Background(), orgID, model.QuotaResources{"cpu": "8", "memory": "4Gi"})
+		require.NoError(t, err)
+	})
+
 	t.Run("unknown organization", func(t *testing.T) {
 		mock := setupMockDB(t)
 
@@ -416,6 +440,22 @@ func TestSetProjectQuota(t *testing.T) {
 
 		_, err := SetProjectQuota(context.Background(), orgID, projID, model.QuotaResources{"cpu": "32"})
 		require.NoError(t, err)
+	})
+
+	t.Run("cannot remove a resource the organization limits while its AZ quotas hold some", func(t *testing.T) {
+		mock := setupMockDB(t)
+
+		mock.ExpectBegin()
+		expectLockOrg(mock, orgID)
+		expectProject(mock, orgID, projID)
+		expectProjectAZQs(mock, projID, [2]string{"az-1", `{"cpu":"4","memory":"1Gi"}`})
+		expectOrgQuota(mock, orgID, `{"cpu":"64","memory":"64Gi"}`)
+		mock.ExpectRollback()
+
+		// memory is no longer set: it would count as 0, below the 1Gi of az-1.
+		_, err := SetProjectQuota(context.Background(), orgID, projID, model.QuotaResources{"cpu": "8"})
+		require.ErrorIs(t, err, ErrBelowAllocated)
+		assert.Contains(t, err.Error(), "memory")
 	})
 
 	t.Run("resource not limited by the organization", func(t *testing.T) {

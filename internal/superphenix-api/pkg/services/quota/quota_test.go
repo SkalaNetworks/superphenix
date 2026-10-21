@@ -45,7 +45,6 @@ func newRouter() chi.Router {
 	r := chi.NewRouter()
 	r.Get("/organization/{orgaId}/quota", svc.GetOrganizationQuota)
 	r.Get("/organization/{orgaId}/project/{projectId}/quota", svc.GetProjectQuota)
-	r.Get("/organization/{orgaId}/project/{projectId}/quota/usage", svc.GetProjectQuotaUsage)
 	r.Put("/organization/{orgaId}/project/{projectId}/quota", svc.SetProjectQuota)
 	r.Put("/organization/{orgaId}/project/{projectId}/quota/az/{codeAZ}", svc.SetProjectAZQuota)
 	r.Delete("/organization/{orgaId}/project/{projectId}/quota", svc.DeleteProjectQuota)
@@ -106,22 +105,19 @@ func TestGetProjectQuotaOfAnotherOrganization(t *testing.T) {
 	orgID, projID := uuid.New(), uuid.New()
 	mock := setupMockDB(t)
 
+	// No AZ controller is called for a project outside the organization.
+	controller := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		t.Errorf("AZ controller called: %s", r.URL.Path)
+	}))
+	defer controller.Close()
+	old := config.Global.AZs
+	config.Global.AZs = map[string]config.AZConfig{"az1": {Code: "az1", ControllerUrl: controller.URL}}
+	t.Cleanup(func() { config.Global.AZs = old })
+
 	mock.ExpectQuery(regexp.QuoteMeta(`SELECT "id" FROM "projects" WHERE (id = $1 AND orga_id = $2)`)).
 		WithArgs(projID, orgID, 1).WillReturnError(gorm.ErrRecordNotFound)
 
 	rr := do(newRouter(), http.MethodGet, fmt.Sprintf("/organization/%s/project/%s/quota", orgID, projID), "")
-	assert.Equal(t, http.StatusNotFound, rr.Code)
-}
-
-func TestGetProjectQuotaUsageOfAnotherOrganization(t *testing.T) {
-	orgID, projID := uuid.New(), uuid.New()
-	mock := setupMockDB(t)
-
-	mock.ExpectQuery(regexp.QuoteMeta(`SELECT "id" FROM "projects" WHERE (id = $1 AND orga_id = $2)`)).
-		WithArgs(projID, orgID, 1).WillReturnError(gorm.ErrRecordNotFound)
-
-	// No AZ controller is called for a project outside the organization.
-	rr := do(newRouter(), http.MethodGet, fmt.Sprintf("/organization/%s/project/%s/quota/usage", orgID, projID), "")
 	assert.Equal(t, http.StatusNotFound, rr.Code)
 }
 

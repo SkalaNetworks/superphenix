@@ -49,7 +49,7 @@ func (h *Service) GetOrganizationQuota(w http.ResponseWriter, r *http.Request) {
 // GetProjectQuota handles GET /organization/{orgaId}/project/{projectId}/quota
 //
 //	@Summary		Get the project quota
-//	@Description	Get the quota of a project and its AZ quotas
+//	@Description	Get the quota of a project (unlimited when not defined), what is allocated to its AZs and what remains, and for every AZ of the organization its AZ quota and what the project currently uses there (ResourceQuota status.used). An AZ whose usage cannot be read is returned with available=false.
 //	@Tags			v1, quota
 //	@Produce		json
 //	@Param			orgaId		path		string							true	"Organization ID"
@@ -66,71 +66,12 @@ func (h *Service) GetProjectQuota(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
-	overview, err := crudQuota.GetProjectQuotaOverview(r.Context(), orgID, projID)
+	overview, err := quotasync.GetProjectQuotaOverview(r.Context(), orgID, projID)
 	if err != nil {
 		WriteError(w, r, err, "failed to get project quota")
 		return
 	}
 	WriteJSON(w, http.StatusOK, overview)
-}
-
-// GetOrganizationQuotaUsage handles GET /organization/{orgaId}/quota/usage
-//
-//	@Summary		Get the organization quota usage
-//	@Description	Get what the organization currently uses (ResourceQuota status.used), per project and AZ and summed. An AZ that cannot be read is returned with available=false and makes the totals incomplete (complete=false).
-//	@Tags			v1, quota
-//	@Produce		json
-//	@Param			orgaId	path		string						true	"Organization ID"
-//	@Success		200		{object}	quotasync.OrganizationUsage	"Organization usage"
-//	@Failure		400
-//	@Failure		403
-//	@Failure		500
-//	@Router			/v1/organization/{orgaId}/quota/usage [get]
-//	@Security		Bearer[OrganizationRead, OrganizationProjectQuotaRead]
-func (h *Service) GetOrganizationQuotaUsage(w http.ResponseWriter, r *http.Request) {
-	WriteOrganizationUsage(w, r)
-}
-
-// WriteOrganizationUsage answers what the organization of the orgaId path parameter currently
-// uses, per project and AZ (shared with the admin API).
-func WriteOrganizationUsage(w http.ResponseWriter, r *http.Request) {
-	orgID, ok := ParseID(w, r, "orgaId")
-	if !ok {
-		return
-	}
-	usage, err := quotasync.GetOrganizationUsage(r.Context(), orgID)
-	if err != nil {
-		WriteError(w, r, err, "failed to get organization quota usage")
-		return
-	}
-	WriteJSON(w, http.StatusOK, usage)
-}
-
-// GetProjectQuotaUsage handles GET /organization/{orgaId}/project/{projectId}/quota/usage
-//
-//	@Summary		Get the project quota usage
-//	@Description	Get what the project currently uses (ResourceQuota status.used), per AZ and summed. An AZ that cannot be read is returned with available=false and makes the total incomplete (complete=false).
-//	@Tags			v1, quota
-//	@Produce		json
-//	@Param			orgaId		path		string					true	"Organization ID"
-//	@Param			projectId	path		string					true	"Project ID"
-//	@Success		200			{object}	quotasync.ProjectUsage	"Project usage"
-//	@Failure		400
-//	@Failure		403
-//	@Failure		404
-//	@Failure		500
-//	@Router			/v1/organization/{orgaId}/project/{projectId}/quota/usage [get]
-//	@Security		Bearer[OrganizationRead, ProjectAZQuotaRead]
-func (h *Service) GetProjectQuotaUsage(w http.ResponseWriter, r *http.Request) {
-	orgID, projID, ok := parseOrgAndProject(w, r)
-	if !ok {
-		return
-	}
-	if err := crudQuota.CheckProject(r.Context(), orgID, projID); err != nil {
-		WriteError(w, r, err, "failed to get project quota usage")
-		return
-	}
-	WriteJSON(w, http.StatusOK, quotasync.GetProjectUsage(r.Context(), orgID, projID))
 }
 
 // SetProjectQuota handles PUT /organization/{orgaId}/project/{projectId}/quota

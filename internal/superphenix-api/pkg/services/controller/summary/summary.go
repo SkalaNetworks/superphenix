@@ -31,13 +31,13 @@ const recentProductLimit = 5
 
 // ProjectSummaryResponse is the resource overview of a project.
 // Product types the caller may not read are absent from Counts, CountsByAZ and Recent, and
-// Resources (the project quota) is absent without ProjectAZQuotaRead.
+// ResourceLimit (the limits of the project quota) is absent without ProjectAZQuotaRead.
 type ProjectSummaryResponse struct {
-	Counts     map[string]int64     `json:"counts"`
-	CountsByAZ map[string]int64     `json:"countsByAz"`
-	Quota      ProjectQuota         `json:"quota"`
-	Resources  model.QuotaResources `json:"resources,omitempty"`
-	Recent     []RecentProduct      `json:"recent"`
+	Counts        map[string]int64     `json:"counts"`
+	CountsByAZ    map[string]int64     `json:"countsByAz"`
+	Quota         ProjectQuota         `json:"quota"`
+	ResourceLimit model.QuotaResources `json:"resourceLimit,omitempty"`
+	Recent        []RecentProduct      `json:"recent"`
 }
 
 // ProjectQuota is the product creation quota of a project. Used counts every product type,
@@ -170,19 +170,19 @@ func buildSummary(projectId uuid.UUID, readableTypes []string, readQuota bool) (
 		return ProjectSummaryResponse{}, err
 	}
 
-	var quotaResources model.QuotaResources
+	var resourceLimit model.QuotaResources
 	if readQuota {
 		if pq, err := quota.GetProjectQuota(context.Background(), projectId); err == nil && pq != nil {
-			quotaResources = pq.Resources
+			resourceLimit = pq.Resources
 		}
 	}
 
 	return ProjectSummaryResponse{
-		Counts:     counts,
-		CountsByAZ: countsByAZ,
-		Quota:      projectQuota,
-		Resources:  quotaResources,
-		Recent:     recent,
+		Counts:        counts,
+		CountsByAZ:    countsByAZ,
+		Quota:         projectQuota,
+		ResourceLimit: resourceLimit,
+		Recent:        recent,
 	}, nil
 }
 

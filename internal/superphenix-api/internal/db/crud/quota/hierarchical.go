@@ -52,22 +52,39 @@ var ReadUsage func(ctx context.Context, orgId, projectId uuid.UUID, codeAZ strin
 // is set by the quotasync package; when nil, lowering an AZ quota fails.
 var PushAZ func(ctx context.Context, orgId, projectId uuid.UUID, codeAZ string, hard map[string]string) error
 
-// OrganizationQuotaOverview is the quota of an organization and its distribution to projects.
+// OrganizationQuotaOverview is the quota of an organization (Limit, absent when Unlimited) and
+// its distribution to projects: what they are allocated (see projectAllocations) and what remains.
 type OrganizationQuotaOverview struct {
 	OrganizationId string               `json:"organizationId"`
 	Unlimited      bool                 `json:"unlimited"`
-	Resources      model.QuotaResources `json:"resources,omitempty"`
+	Limit          model.QuotaResources `json:"limit,omitempty"`
 	Allocated      model.QuotaResources `json:"allocated"`
 	Remaining      model.QuotaResources `json:"remaining,omitempty"`
 	ProjectQuotas  []model.ProjectQuota `json:"projectQuotas"`
 }
 
-// ProjectQuotaOverview is the quota of a project and its distribution to AZs.
+// ProjectQuotaOverview is the quota of a project (Limit, absent when Unlimited) and its
+// distribution to AZs: what they are allocated (the sum of the AZ quotas) and what remains.
 type ProjectQuotaOverview struct {
-	ProjectId      string                 `json:"projectId"`
-	OrganizationId string                 `json:"organizationId"`
-	Resources      model.QuotaResources   `json:"resources,omitempty"`
-	AZQuotas       []model.ProjectAZQuota `json:"azQuotas"`
+	ProjectId      string               `json:"projectId"`
+	OrganizationId string               `json:"organizationId"`
+	Unlimited      bool                 `json:"unlimited"`
+	Limit          model.QuotaResources `json:"limit,omitempty"`
+	Allocated      model.QuotaResources `json:"allocated"`
+	Remaining      model.QuotaResources `json:"remaining,omitempty"`
+	AZQuotas       []AZQuotaOverview    `json:"azQuotas"`
+}
+
+// AZQuotaOverview is the quota of a project in one AZ (Limit, absent when no AZ quota is set)
+// and what the project currently uses there (Used, the `status.used` of its ResourceQuota, see
+// the quotasync package). Kubernetes only tracks the resources the ResourceQuota limits, so a
+// resource without limit in the AZ is absent from Used.
+type AZQuotaOverview struct {
+	CodeAZ string               `json:"codeAZ"`
+	Limit  model.QuotaResources `json:"limit,omitempty"`
+	// Available is false when the usage could not be read from the AZ: Used is then empty.
+	Available bool                 `json:"available"`
+	Used      model.QuotaResources `json:"used"`
 }
 
 // GetOrganizationQuotaOverview returns the organization quota (unlimited when not defined),
@@ -98,16 +115,18 @@ func GetOrganizationQuotaOverview(ctx context.Context, orgId uuid.UUID) (Organiz
 			return overview, err
 		}
 		overview.Unlimited = false
-		overview.Resources = oq.Resources
+		overview.Limit = oq.Resources
 		overview.Remaining = parsedOrg.Sub(allocated).Resources()
 	}
 	return overview, nil
 }
 
-// GetProjectQuotaOverview returns the quota of a project of the organization and its AZ quotas.
+// GetProjectQuotaOverview returns the quota of a project of the organization (unlimited when
+// not defined), its AZ quotas, the sum allocated to them and what remains. The usage of the
+// AZs is not read (see quotasync.GetProjectQuotaOverview).
 func GetProjectQuotaOverview(ctx context.Context, orgId, projectId uuid.UUID) (ProjectQuotaOverview, error) {
 	tx := db.Client.WithContext(ctx)
-	overview := ProjectQuotaOverview{ProjectId: projectId.String(), OrganizationId: orgId.String()}
+	overview := ProjectQuotaOverview{ProjectId: projectId.String(), OrganizationId: orgId.String(), Unlimited: true, AZQuotas: []AZQuotaOverview{}}
 
 	if err := checkProject(tx, orgId, projectId); err != nil {
 		return overview, err
@@ -116,11 +135,29 @@ func GetProjectQuotaOverview(ctx context.Context, orgId, projectId uuid.UUID) (P
 	if err != nil {
 		return overview, err
 	}
-	if pq != nil {
-		overview.Resources = pq.Resources
-	}
-	if err := tx.Where("project_id = ?", projectId).Order("code_az").Find(&overview.AZQuotas).Error; err != nil {
+	var azqs []model.ProjectAZQuota
+	if err := tx.Where("project_id = ?", projectId).Order("code_az").Find(&azqs).Error; err != nil {
 		return overview, err
+	}
+
+	allocated := spxQuota.Quantities{}
+	for _, azq := range azqs {
+		parsed, err := azq.Resources.Parse()
+		if err != nil {
+			return overview, err
+		}
+		allocated = allocated.Add(parsed)
+		overview.AZQuotas = append(overview.AZQuotas, AZQuotaOverview{CodeAZ: azq.CodeAZ, Limit: azq.Resources, Used: model.QuotaResources{}})
+	}
+	overview.Allocated = allocated.Resources()
+	if pq != nil {
+		parsedProj, err := pq.Resources.Parse()
+		if err != nil {
+			return overview, err
+		}
+		overview.Unlimited = false
+		overview.Limit = pq.Resources
+		overview.Remaining = parsedProj.Sub(allocated).Resources()
 	}
 	return overview, nil
 }
@@ -194,11 +231,6 @@ func WithOrganizationLock(ctx context.Context, orgId uuid.UUID, fn func() error)
 	})
 }
 
-// CheckProject ensures the project exists and belongs to the organization (ErrProjectNotFound otherwise).
-func CheckProject(ctx context.Context, orgId, projectId uuid.UUID) error {
-	return checkProject(db.Client.WithContext(ctx), orgId, projectId)
-}
-
 // GetProjectQuota retrieves a project's quota, or nil if not defined.
 func GetProjectQuota(ctx context.Context, projectId uuid.UUID) (*model.ProjectQuota, error) {
 	return findProjectQuota(db.Client.WithContext(ctx), projectId)
@@ -212,7 +244,9 @@ func GetProjectQuota(ctx context.Context, projectId uuid.UUID) (*model.ProjectQu
 //
 // When no project quota exists yet, the organization quota is distributed among the projects
 // of the organization: each one gets what its AZ quotas already hold, plus an equal part of the
-// rest (and, when it has no AZ quota, its project quota is split among the AZs).
+// rest (and, when it has no AZ quota, its project quota is split among the AZs). Otherwise, the
+// project quotas get what their AZ quotas hold of the resources it limits and they do not (see
+// coverAZQuotas), so that no project ends up below its AZ quotas.
 func SetOrganizationQuota(ctx context.Context, orgId uuid.UUID, resources model.QuotaResources) (*model.OrganizationQuota, error) {
 	parsedOrg, err := resources.Parse()
 	if err != nil {
@@ -250,6 +284,8 @@ func SetOrganizationQuota(ctx context.Context, orgId uuid.UUID, resources model.
 					return err
 				}
 			}
+		} else if err := coverAZQuotas(tx, orgId, parsedOrg, pqs, allocations); err != nil {
+			return err
 		}
 
 		return upsert(tx, &saved, []string{"organization_id"}, "resources")
@@ -265,9 +301,10 @@ func SetOrganizationQuota(ctx context.Context, orgId uuid.UUID, resources model.
 // are kept as they are.
 //
 // The project quota cannot be lower than the sum of its AZ quotas, on any resource it limits
-// (ErrBelowAllocated). It can be set whether or not the organization has a quota. When it has
-// one, the sum of the project allocations (see projectAllocations) must fit in it (see
-// checkCapacity).
+// (ErrBelowAllocated). Omitting a resource the organization limits counts as limiting it to 0
+// (see projectLimit), so it is refused while the AZ quotas hold some of it. It can be set
+// whether or not the organization has a quota. When it has one, the sum of the project
+// allocations (see projectAllocations) must fit in it (see checkCapacity).
 func SetProjectQuota(ctx context.Context, orgId, projectId uuid.UUID, resources model.QuotaResources) (*model.ProjectQuota, error) {
 	parsedProj, err := resources.Parse()
 	if err != nil {
@@ -307,6 +344,13 @@ func SetProjectQuota(ctx context.Context, orgId, projectId uuid.UUID, resources 
 			parsedOrg, err := oq.Resources.Parse()
 			if err != nil {
 				return err
+			}
+			limit, err := projectLimit(oq, &model.ProjectQuota{Resources: resources})
+			if err != nil {
+				return err
+			}
+			if err := checkNotBelow(limit, azSum, "its availability zones"); err != nil {
+				return fmt.Errorf("%w (a resource the organization limits cannot be removed from the project quota while its AZ quotas hold some)", err)
 			}
 			pqs, err := listProjectQuotas(tx, orgId)
 			if err != nil {
@@ -752,6 +796,40 @@ func projectAllocations(tx *gorm.DB, orgId uuid.UUID, pqs []model.ProjectQuota) 
 		allocations[projectId] = allocations[projectId].Max(q)
 	}
 	return allocations, nil
+}
+
+// coverAZQuotas adds to the project quotas, for every resource the organization limits (parsedOrg)
+// and a project quota does not, what the AZ quotas of the project hold of it (its allocation, see
+// projectAllocations). Such a resource would otherwise count as 0 for the project (see
+// projectLimit), below its AZ quotas. A project with AZ quotas but no project quota gets one.
+func coverAZQuotas(tx *gorm.DB, orgId uuid.UUID, parsedOrg spxQuota.Quantities, pqs []model.ProjectQuota, allocations map[uuid.UUID]spxQuota.Quantities) error {
+	defined := make(map[uuid.UUID]model.QuotaResources, len(pqs))
+	for _, pq := range pqs {
+		defined[pq.ProjectId] = pq.Resources
+	}
+
+	projectIds := slices.SortedFunc(maps.Keys(allocations), func(a, b uuid.UUID) int { return strings.Compare(a.String(), b.String()) })
+	for _, projectId := range projectIds {
+		missing := spxQuota.Quantities{}
+		for name, v := range allocations[projectId].Only(parsedOrg) {
+			if _, ok := defined[projectId][name]; !ok && v > 0 {
+				missing[name] = v
+			}
+		}
+		if len(missing) == 0 {
+			continue
+		}
+		resources := maps.Clone(defined[projectId])
+		if resources == nil {
+			resources = model.QuotaResources{}
+		}
+		maps.Copy(resources, missing.Resources())
+		pq := model.ProjectQuota{ProjectId: projectId, OrganizationId: orgId, Resources: resources}
+		if err := upsert(tx, &pq, []string{"project_id"}, "organization_id", "resources"); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 func sum(allocations map[uuid.UUID]spxQuota.Quantities) spxQuota.Quantities {

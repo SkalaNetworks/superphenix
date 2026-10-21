@@ -19,8 +19,6 @@ var auditResource = router.Resource{Name: "quota", Label: "Quota"}
 type API interface {
 	GetOrganizationQuota(http.ResponseWriter, *http.Request)
 	GetProjectQuota(http.ResponseWriter, *http.Request)
-	GetOrganizationQuotaUsage(http.ResponseWriter, *http.Request)
-	GetProjectQuotaUsage(http.ResponseWriter, *http.Request)
 	SetProjectQuota(http.ResponseWriter, *http.Request)
 	SetProjectAZQuota(http.ResponseWriter, *http.Request)
 	DeleteProjectQuota(http.ResponseWriter, *http.Request)
@@ -52,8 +50,6 @@ func Module(s API) router.Module {
 		Routes: []router.Route{
 			router.Get("/organization/{orgaId}/quota", s.GetOrganizationQuota, jwtOrToken, orgaRead, orgaProjectQuotaRead),
 			router.Get("/organization/{orgaId}/project/{projectId}/quota", s.GetProjectQuota, jwtOrToken, orgaRead, projectAZQuotaRead),
-			router.Get("/organization/{orgaId}/quota/usage", s.GetOrganizationQuotaUsage, jwtOrToken, orgaRead, orgaProjectQuotaRead),
-			router.Get("/organization/{orgaId}/project/{projectId}/quota/usage", s.GetProjectQuotaUsage, jwtOrToken, orgaRead, projectAZQuotaRead),
 			router.Put("/organization/{orgaId}/project/{projectId}/quota", s.SetProjectQuota, jwtOrToken, orgaRead, orgaProjectQuotaWrite).
 				Audited(auditResource, router.ActionUpdate, "projectId"),
 			router.Put("/organization/{orgaId}/project/{projectId}/quota/az/{codeAZ}", s.SetProjectAZQuota, jwtOrToken, orgaRead, projectAZQuotaWrite).

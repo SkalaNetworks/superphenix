@@ -49,15 +49,17 @@ func newRouter() chi.Router {
 }
 
 func TestAdminGetOrganizationQuota(t *testing.T) {
-	orgID := uuid.New()
+	orgID, projectID := uuid.New(), uuid.New()
 	mock := setupMockDB(t)
 
 	mock.ExpectQuery(regexp.QuoteMeta(`SELECT * FROM "organization_quotas"`)).
 		WillReturnRows(sqlmock.NewRows([]string{"organization_id", "resources"}).AddRow(orgID, `{"cpu":"64"}`))
 	mock.ExpectQuery(regexp.QuoteMeta(`SELECT * FROM "project_quotas"`)).
-		WillReturnRows(sqlmock.NewRows([]string{"project_id", "organization_id", "resources"}).AddRow(uuid.New(), orgID, `{"cpu":"16"}`))
+		WillReturnRows(sqlmock.NewRows([]string{"project_id", "organization_id", "resources"}).AddRow(projectID, orgID, `{"cpu":"16"}`))
 	mock.ExpectQuery(regexp.QuoteMeta(`SELECT * FROM "project_az_quotas"`)).
 		WillReturnRows(sqlmock.NewRows([]string{"project_id", "code_az", "resources"}))
+	mock.ExpectQuery(regexp.QuoteMeta(`SELECT "id" FROM "projects" WHERE orga_id = $1`)).
+		WillReturnRows(sqlmock.NewRows([]string{"id"}).AddRow(projectID))
 
 	rr := httptest.NewRecorder()
 	newRouter().ServeHTTP(rr, httptest.NewRequest(http.MethodGet, "/organization/"+orgID.String(), nil))

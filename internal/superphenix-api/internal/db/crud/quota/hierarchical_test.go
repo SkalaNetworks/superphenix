@@ -142,6 +142,15 @@ func expectCountAZQs(mock sqlmock.Sqlmock, projID uuid.UUID, count int) {
 	mock.ExpectQuery(sqlCountAZQs).WithArgs(projID).WillReturnRows(sqlmock.NewRows([]string{"count"}).AddRow(count))
 }
 
+// expectProjectIds expects the IDs of the live projects of the organization (see ListProjectIds).
+func expectProjectIds(mock sqlmock.Sqlmock, orgID uuid.UUID, ids ...uuid.UUID) {
+	r := sqlmock.NewRows([]string{"id"})
+	for _, id := range ids {
+		r.AddRow(id)
+	}
+	mock.ExpectQuery(regexp.QuoteMeta(`SELECT "id" FROM "projects" WHERE orga_id = $1`)).WithArgs(orgID).WillReturnRows(r)
+}
+
 func expectUpsertAZQ(mock sqlmock.Sqlmock, projID uuid.UUID, codeAZ, resources string) {
 	mock.ExpectQuery(sqlUpsertAZQ).
 		WithArgs(projID, codeAZ, sqlmock.AnyArg(), sqlmock.AnyArg(), nil, resources).
@@ -163,13 +172,34 @@ func TestGetOrganizationQuotaOverview(t *testing.T) {
 			[3]any{proj1, "az-1", `{"cpu":"8"}`},
 			[3]any{proj3, "az-1", `{"cpu":"1"}`},
 			[3]any{proj3, "az-2", `{"cpu":"1","memory":"1Gi"}`})
+		expectProjectIds(mock, orgID, proj1, proj2, proj3)
 
 		overview, err := GetOrganizationQuotaOverview(context.Background(), orgID)
 		require.NoError(t, err)
 		assert.False(t, overview.Unlimited)
 		assert.Equal(t, model.QuotaResources{"cpu": "18500m", "memory": "65Gi", "disk": "50Gi"}, overview.Allocated)
 		assert.Equal(t, model.QuotaResources{"cpu": "45500m", "memory": "191Gi", "disk": "50Gi"}, overview.Remaining)
-		assert.Len(t, overview.ProjectQuotas, 2)
+		// Every project is listed with its effective limit: 0 for what the organization limits
+		// and the project quota does not (or when there is no project quota).
+		assert.Equal(t, []model.ProjectQuota{
+			{ProjectId: proj1, OrganizationId: orgID, Resources: model.QuotaResources{"cpu": "16", "memory": "64Gi", "disk": "50Gi"}},
+			{ProjectId: proj2, OrganizationId: orgID, Resources: model.QuotaResources{"cpu": "500m", "memory": "0", "disk": "0"}},
+			{ProjectId: proj3, OrganizationId: orgID, Resources: model.QuotaResources{"cpu": "0", "memory": "0", "disk": "0"}},
+		}, overview.ProjectQuotas)
+	})
+
+	t.Run("allocated is 0 for a limited resource nobody holds", func(t *testing.T) {
+		mock := setupMockDB(t)
+		expectOrgQuota(mock, orgID, `{"cpu":"8","memory":"1Gi"}`)
+		expectListPQs(mock, orgID)
+		expectOrgAZQs(mock, orgID)
+		expectProjectIds(mock, orgID)
+
+		overview, err := GetOrganizationQuotaOverview(context.Background(), orgID)
+		require.NoError(t, err)
+		assert.Equal(t, model.QuotaResources{"cpu": "0", "memory": "0"}, overview.Allocated)
+		assert.Equal(t, model.QuotaResources{"cpu": "8", "memory": "1Gi"}, overview.Remaining)
+		assert.Empty(t, overview.ProjectQuotas)
 	})
 
 	t.Run("unlimited", func(t *testing.T) {

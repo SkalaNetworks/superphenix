@@ -47,6 +47,8 @@ func TestGetProjectQuotaOverview(t *testing.T) {
 
 	mock := setupMockDB(t)
 	mock.ExpectQuery(regexp.QuoteMeta(`SELECT "id" FROM "projects"`)).WillReturnRows(sqlmock.NewRows([]string{"id"}).AddRow(projectId))
+	mock.ExpectQuery(regexp.QuoteMeta(`SELECT * FROM "organization_quotas"`)).
+		WillReturnRows(sqlmock.NewRows([]string{"organization_id", "resources"}).AddRow(orgId, `{"cpu":"64","memory":"8Gi"}`))
 	mock.ExpectQuery(regexp.QuoteMeta(`SELECT * FROM "project_quotas"`)).
 		WillReturnRows(sqlmock.NewRows([]string{"project_id", "organization_id", "resources"}).AddRow(projectId, orgId, `{"cpu":"16"}`))
 	// az1 has an AZ quota, az2 and az3 none; az-old is no longer available to the organization.
@@ -57,14 +59,17 @@ func TestGetProjectQuotaOverview(t *testing.T) {
 
 	overview, err := GetProjectQuotaOverview(context.Background(), orgId, projectId)
 	require.NoError(t, err)
-	assert.Equal(t, model.QuotaResources{"cpu": "16"}, overview.Limit)
-	assert.Equal(t, model.QuotaResources{"cpu": "5"}, overview.Allocated)
+	// memory is limited by the organization but not by the project: effectively 0.
+	assert.Equal(t, model.QuotaResources{"cpu": "16", "memory": "0"}, overview.Limit)
+	assert.Equal(t, model.QuotaResources{"cpu": "5", "memory": "0"}, overview.Allocated)
+	assert.Equal(t, model.QuotaResources{"cpu": "11", "memory": "0"}, overview.Remaining)
+	// Each AZ shows the limit it enforces: 0 for what a parent limits without AZ share.
 	assert.Equal(t, []crudQuota.AZQuotaOverview{
-		{CodeAZ: "az-old", Limit: model.QuotaResources{"cpu": "1"}, Used: model.QuotaResources{}},
-		{CodeAZ: "az1", Limit: model.QuotaResources{"cpu": "4"}, Available: true, Used: model.QuotaResources{"cpu": "2500m", "memory": "1Gi"}},
-		{CodeAZ: "az2", Available: true, Used: model.QuotaResources{"cpu": "500m", "disk": "10Gi"}},
+		{CodeAZ: "az-old", Limit: model.QuotaResources{"cpu": "1", "memory": "0"}, Used: model.QuotaResources{}},
+		{CodeAZ: "az1", Limit: model.QuotaResources{"cpu": "4", "memory": "0"}, Available: true, Used: model.QuotaResources{"cpu": "2500m", "memory": "1Gi"}},
+		{CodeAZ: "az2", Limit: model.QuotaResources{"cpu": "0", "memory": "0"}, Available: true, Used: model.QuotaResources{"cpu": "500m", "disk": "10Gi"}},
 		// An unreachable AZ is reported as unavailable.
-		{CodeAZ: "az3", Used: model.QuotaResources{}},
+		{CodeAZ: "az3", Limit: model.QuotaResources{"cpu": "0", "memory": "0"}, Used: model.QuotaResources{}},
 	}, overview.AZQuotas)
 
 	// The reader registered for the crud checks gives the enforced and used quantities of one AZ.

@@ -178,6 +178,18 @@ func (q Quantities) Max(other Quantities) Quantities {
 	return res
 }
 
+// WithZeros returns q with 0 for every resource of names that q does not have.
+func (q Quantities) WithZeros(names Quantities) Quantities {
+	res := make(Quantities, len(q)+len(names))
+	for name := range names {
+		res[name] = 0
+	}
+	for name, v := range q {
+		res[name] = v
+	}
+	return res
+}
+
 // Only returns the resources of q that keep also has.
 func (q Quantities) Only(keep Quantities) Quantities {
 	res := make(Quantities, len(keep))
@@ -254,13 +266,21 @@ func saturatingAdd(a, b int64) int64 {
 // allocation for (e.g. a project created, or an AZ added, after the quotas
 // were distributed), that resource is enforced at 0 in the AZ.
 func EffectiveAZQuota(org, project, az Resources) Resources {
-	res := make(Resources, len(org)+len(project)+len(az))
-	for _, parent := range []Resources{org, project} {
+	return Effective(az, org, project)
+}
+
+// Effective returns the limit that actually applies to a level, given its own quota and the
+// quotas of its ancestors (nil when a level has no quota): its own quota, plus 0 for every
+// resource an ancestor limits but its own quota does not. A resource absent from the result
+// is not limited at all.
+func Effective(own Resources, ancestors ...Resources) Resources {
+	res := make(Resources, len(own))
+	for _, parent := range ancestors {
 		for name := range parent {
 			res[name] = "0"
 		}
 	}
-	for name, v := range az {
+	for name, v := range own {
 		res[name] = v
 	}
 	return res

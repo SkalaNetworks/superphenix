@@ -53,7 +53,10 @@ var ReadUsage func(ctx context.Context, orgId, projectId uuid.UUID, codeAZ strin
 var PushAZ func(ctx context.Context, orgId, projectId uuid.UUID, codeAZ string, hard map[string]string) error
 
 // OrganizationQuotaOverview is the quota of an organization (Limit, absent when Unlimited) and
-// its distribution to projects: what they are allocated (see projectAllocations) and what remains.
+// its distribution to projects: what they are allocated (see projectAllocations, 0 for a limited
+// resource no project holds) and what remains. ProjectQuotas holds the effective limit of the
+// projects (see spxQuota.Effective): when the organization has a quota, every live project is
+// listed, a resource the organization limits but the project quota does not being limited to 0.
 type OrganizationQuotaOverview struct {
 	OrganizationId string               `json:"organizationId"`
 	Unlimited      bool                 `json:"unlimited"`
@@ -63,8 +66,10 @@ type OrganizationQuotaOverview struct {
 	ProjectQuotas  []model.ProjectQuota `json:"projectQuotas"`
 }
 
-// ProjectQuotaOverview is the quota of a project (Limit, absent when Unlimited) and its
-// distribution to AZs: what they are allocated (the sum of the AZ quotas) and what remains.
+// ProjectQuotaOverview is the effective quota of a project (Limit, absent when Unlimited: the
+// project quota, plus 0 for every resource the organization limits but the project quota does
+// not) and its distribution to AZs: what they are allocated (the sum of the AZ quotas, 0 for a
+// limited resource no AZ holds) and what remains.
 type ProjectQuotaOverview struct {
 	ProjectId      string               `json:"projectId"`
 	OrganizationId string               `json:"organizationId"`
@@ -75,8 +80,9 @@ type ProjectQuotaOverview struct {
 	AZQuotas       []AZQuotaOverview    `json:"azQuotas"`
 }
 
-// AZQuotaOverview is the quota of a project in one AZ (Limit, absent when no AZ quota is set)
-// and what the project currently uses there (Used, the `status.used` of its ResourceQuota, see
+// AZQuotaOverview is the effective quota of a project in one AZ (Limit, the one enforced, see
+// spxQuota.EffectiveAZQuota; absent when no level limits anything) and what the project
+// currently uses there (Used, the `status.used` of its ResourceQuota, see
 // the quotasync package). Kubernetes only tracks the resources the ResourceQuota limits, so a
 // resource without limit in the AZ is absent from Used.
 type AZQuotaOverview struct {
@@ -109,14 +115,35 @@ func GetOrganizationQuotaOverview(ctx context.Context, orgId uuid.UUID) (Organiz
 
 	overview.ProjectQuotas = pqs
 	overview.Allocated = allocated.Resources()
-	if oq != nil {
-		parsedOrg, err := oq.Resources.Parse()
-		if err != nil {
-			return overview, err
-		}
-		overview.Unlimited = false
-		overview.Limit = oq.Resources
-		overview.Remaining = parsedOrg.Sub(allocated).Resources()
+	// A quota that limits no resource (e.g. set to {}) is unlimited too.
+	if oq == nil || len(oq.Resources) == 0 {
+		return overview, nil
+	}
+	parsedOrg, err := oq.Resources.Parse()
+	if err != nil {
+		return overview, err
+	}
+	overview.Unlimited = false
+	overview.Limit = oq.Resources
+	overview.Allocated = allocated.WithZeros(parsedOrg).Resources()
+	overview.Remaining = parsedOrg.Sub(allocated).Resources()
+
+	// Every live project is limited by the organization quota, with or without a project quota.
+	projectIds, err := ListProjectIds(ctx, orgId)
+	if err != nil {
+		return overview, err
+	}
+	defined := make(map[uuid.UUID]model.QuotaResources, len(pqs))
+	for _, pq := range pqs {
+		defined[pq.ProjectId] = pq.Resources
+	}
+	overview.ProjectQuotas = make([]model.ProjectQuota, 0, len(projectIds))
+	for _, projectId := range projectIds {
+		overview.ProjectQuotas = append(overview.ProjectQuotas, model.ProjectQuota{
+			ProjectId:      projectId,
+			OrganizationId: orgId,
+			Resources:      spxQuota.Effective(defined[projectId], oq.Resources),
+		})
 	}
 	return overview, nil
 }
@@ -131,6 +158,10 @@ func GetProjectQuotaOverview(ctx context.Context, orgId, projectId uuid.UUID) (P
 	if err := checkProject(tx, orgId, projectId); err != nil {
 		return overview, err
 	}
+	oq, err := findOrganizationQuota(tx, orgId)
+	if err != nil {
+		return overview, err
+	}
 	pq, err := findProjectQuota(tx, projectId)
 	if err != nil {
 		return overview, err
@@ -139,26 +170,50 @@ func GetProjectQuotaOverview(ctx context.Context, orgId, projectId uuid.UUID) (P
 	if err := tx.Where("project_id = ?", projectId).Order("code_az").Find(&azqs).Error; err != nil {
 		return overview, err
 	}
+	var orgResources, projResources model.QuotaResources
+	if oq != nil {
+		orgResources = oq.Resources
+	}
+	if pq != nil {
+		projResources = pq.Resources
+	}
 
 	allocated := spxQuota.Quantities{}
+	definedAZs := map[string]model.QuotaResources{}
 	for _, azq := range azqs {
 		parsed, err := azq.Resources.Parse()
 		if err != nil {
 			return overview, err
 		}
 		allocated = allocated.Add(parsed)
-		overview.AZQuotas = append(overview.AZQuotas, AZQuotaOverview{CodeAZ: azq.CodeAZ, Limit: azq.Resources, Used: model.QuotaResources{}})
+		definedAZs[azq.CodeAZ] = azq.Resources
 	}
-	overview.Allocated = allocated.Resources()
-	if pq != nil {
-		parsedProj, err := pq.Resources.Parse()
-		if err != nil {
-			return overview, err
+	// Every AZ of the organization, plus the AZ quotas of AZs it no longer has.
+	codes := slices.Collect(maps.Keys(definedAZs))
+	for _, azCfg := range az.FindAll(orgId.String()) {
+		if _, ok := definedAZs[azCfg.Code]; !ok {
+			codes = append(codes, azCfg.Code)
 		}
-		overview.Unlimited = false
-		overview.Limit = pq.Resources
-		overview.Remaining = parsedProj.Sub(allocated).Resources()
 	}
+	slices.Sort(codes)
+	for _, code := range codes {
+		limit := spxQuota.EffectiveAZQuota(orgResources, projResources, definedAZs[code])
+		if len(limit) == 0 {
+			limit = nil
+		}
+		overview.AZQuotas = append(overview.AZQuotas, AZQuotaOverview{CodeAZ: code, Limit: limit, Used: model.QuotaResources{}})
+	}
+
+	overview.Allocated = allocated.Resources()
+	// A quota that limits no resource (e.g. set to {}) is unlimited too.
+	limit, err := projectLimit(oq, pq)
+	if err != nil || len(limit) == 0 {
+		return overview, err
+	}
+	overview.Unlimited = false
+	overview.Limit = spxQuota.Effective(projResources, orgResources)
+	overview.Allocated = allocated.WithZeros(limit).Resources()
+	overview.Remaining = limit.Sub(allocated).Resources()
 	return overview, nil
 }
 

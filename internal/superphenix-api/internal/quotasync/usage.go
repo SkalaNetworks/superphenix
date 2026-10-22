@@ -7,7 +7,6 @@ import (
 	"io"
 	"net/http"
 	"slices"
-	"strings"
 	"time"
 
 	"github.com/google/uuid"
@@ -69,13 +68,6 @@ func GetProjectQuotaOverview(ctx context.Context, orgId, projectId uuid.UUID) (c
 	}
 
 	azs := targets(orgId, nil)
-	for _, azCfg := range azs {
-		if !slices.ContainsFunc(overview.AZQuotas, func(azq crudQuota.AZQuotaOverview) bool { return azq.CodeAZ == azCfg.Code }) {
-			overview.AZQuotas = append(overview.AZQuotas, crudQuota.AZQuotaOverview{CodeAZ: azCfg.Code, Used: spxQuota.Resources{}})
-		}
-	}
-	slices.SortFunc(overview.AZQuotas, func(a, b crudQuota.AZQuotaOverview) int { return strings.Compare(a.CodeAZ, b.CodeAZ) })
-
 	log := logger.GetLogger(ctx)
 	g := new(errgroup.Group)
 	g.SetLimit(usageConcurrency)

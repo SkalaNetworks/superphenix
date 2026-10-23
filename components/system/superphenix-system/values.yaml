@@ -752,7 +752,7 @@ apps:
           virtualMachineInstancesPerNode: 100
 
           # Storageclass used to store TPM/EFI and more (VM backend storage)
-          vmStateStorageClass: default.spx-rbd-3x
+          vmStateStorageClass: spx-storage.spx-rbd-3x
 
           # Defines how VMs are evicted from a node when it is drained.
           # We run live migrations of the VMs to prevent interruptions.

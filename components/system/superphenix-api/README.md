@@ -32,6 +32,9 @@ Helm chart to deploy the Superphenix API
 | ingress.tls[0].hosts[0] | string | `"api.superphenix.net"` |  |
 | ingress.tls[0].secretName | string | `"superphenix-api-tls"` |  |
 | nameOverride | string | `""` |  |
+| networkPolicy.allowedFrom | list | `[]` | Peers allowed to call the API port. Empty means any source (e.g. Ingress controller). |
+| networkPolicy.enabled | bool | `false` | Restrict ingress to the API. Disabled by default: validate it on your CNI first (kubelet probes, ingress controller reaching the API). |
+| networkPolicy.metricsFrom | list | `[]` | Peers allowed to scrape metrics. Empty means any source. |
 | nodeSelector | object | `{}` |  |
 | podAnnotations | object | `{}` |  |
 | podSecurityContext | object | `{}` |  |

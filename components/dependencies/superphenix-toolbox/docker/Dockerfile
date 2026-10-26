@@ -51,7 +51,7 @@ RUN case "${TARGETARCH}" in \
 # Entrypoint script: symlinks the operator-managed aggregated kubeconfig into
 # ~/.kube/config so all tools pick it up automatically. The kubelet updates
 # the mounted Secret file in place when credentials are rotated.
-COPY toolbox-entrypoint.sh /usr/local/bin/toolbox-entrypoint.sh
+COPY components/dependencies/superphenix-toolbox/docker/toolbox-entrypoint.sh /usr/local/bin/toolbox-entrypoint.sh
 RUN chmod +x /usr/local/bin/toolbox-entrypoint.sh
 
 ENTRYPOINT ["/bin/bash", "/usr/local/bin/toolbox-entrypoint.sh"]

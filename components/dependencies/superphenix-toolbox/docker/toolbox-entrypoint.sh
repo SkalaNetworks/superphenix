@@ -21,7 +21,7 @@ until [[ -f "${KUBECONFIG_FILE}" ]]; do
 done
 
 # Symlink the operator-managed kubeconfig into ~/.kube/config so that
-# all tools (kubectl, helm, k9s) pick it up without extra configuration.
+# all tools (kubectl, helm, k9s, argocd, velero) pick it up without extra configuration.
 ln -sf "${KUBECONFIG_FILE}" "${KUBE_DIR}/config"
 echo "[toolbox] Kubeconfig linked: ${KUBECONFIG_FILE} -> ${KUBE_DIR}/config"
 

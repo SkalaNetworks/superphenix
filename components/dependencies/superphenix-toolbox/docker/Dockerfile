@@ -3,6 +3,8 @@ FROM alpine:3.21
 ARG KUBECTL_VERSION=v1.32.3
 ARG HELM_VERSION=v3.17.3
 ARG K9S_VERSION=v0.32.7
+ARG ARGOCD_VERSION=v2.14.4
+ARG VELERO_VERSION=v1.15.2
 ARG TARGETARCH
 
 RUN apk add --no-cache \
@@ -47,6 +49,25 @@ RUN case "${TARGETARCH}" in \
     curl -fsSL "https://github.com/derailed/k9s/releases/download/${K9S_VERSION}/k9s_Linux_${ARCH}.tar.gz" \
     | tar -xz -C /usr/local/bin k9s \
     && chmod +x /usr/local/bin/k9s
+
+# Install argocd
+RUN case "${TARGETARCH}" in \
+      amd64) ARCH="amd64" ;; \
+      arm64) ARCH="arm64" ;; \
+      *) ARCH="amd64" ;; \
+    esac && \
+    curl -fsSL "https://github.com/argoproj/argo-cd/releases/download/${ARGOCD_VERSION}/argocd-linux-${ARCH}" -o /usr/local/bin/argocd \
+    && chmod +x /usr/local/bin/argocd
+
+# Install velero
+RUN case "${TARGETARCH}" in \
+      amd64) ARCH="amd64" ;; \
+      arm64) ARCH="arm64" ;; \
+      *) ARCH="amd64" ;; \
+    esac && \
+    curl -fsSL "https://github.com/vmware-tanzu/velero/releases/download/${VELERO_VERSION}/velero-${VELERO_VERSION}-linux-${ARCH}.tar.gz" \
+    | tar -xz --strip-components=1 -C /usr/local/bin "velero-${VELERO_VERSION}-linux-${ARCH}/velero" \
+    && chmod +x /usr/local/bin/velero
 
 # Entrypoint script: symlinks the operator-managed aggregated kubeconfig into
 # ~/.kube/config so all tools pick it up automatically. The kubelet updates

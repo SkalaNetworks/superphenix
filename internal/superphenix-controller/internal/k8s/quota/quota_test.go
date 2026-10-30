@@ -6,6 +6,7 @@ import (
 	"testing"
 
 	"github.com/super-phenix/superphenix/internal/superphenix-controller/pkg/config"
+	spxId "github.com/super-phenix/superphenix/pkg/superphenix-id"
 	v1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -270,8 +271,8 @@ func TestApplyWithRevision(t *testing.T) {
 	if err != nil {
 		t.Fatalf("quota not found: %v", err)
 	}
-	if rq.Annotations["superphenix.net/quota-revision"] != "10" {
-		t.Fatalf("expected annotation 10, got %s", rq.Annotations["superphenix.net/quota-revision"])
+	if rq.Annotations[spxId.SpxAnnotationQuotaRevision] != "10" {
+		t.Fatalf("expected annotation 10, got %s", rq.Annotations[spxId.SpxAnnotationQuotaRevision])
 	}
 	q := rq.Spec.Hard[v1.ResourceName("requests.cpu")]
 	if q.String() != "4" {
@@ -310,8 +311,8 @@ func TestApplyWithRevision(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if rq.Annotations["superphenix.net/quota-revision"] != "15" {
-		t.Fatalf("expected annotation 15, got %s", rq.Annotations["superphenix.net/quota-revision"])
+	if rq.Annotations[spxId.SpxAnnotationQuotaRevision] != "15" {
+		t.Fatalf("expected annotation 15, got %s", rq.Annotations[spxId.SpxAnnotationQuotaRevision])
 	}
 	q = rq.Spec.Hard[v1.ResourceName("requests.cpu")]
 	if q.String() != "8" {

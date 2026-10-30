@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"slices"
+	"strconv"
 	"strings"
 
 	"github.com/super-phenix/superphenix/internal/superphenix-controller/internal/k8s"
@@ -68,21 +69,27 @@ func IsGitops(rq *v1.ResourceQuota) bool {
 // Apply creates or replaces the ResourceQuota of the project with hard, creating the
 // project namespace if needed. Resources absent from hard are no longer limited.
 // A GitOps-managed ResourceQuota is skipped: it is left as is and no error is returned.
+// When revision is given and the existing ResourceQuota has a newer revision annotation,
+// the update is skipped (stale push).
 //
 // A limit that is lowered cannot go below its `status.used` (ErrBelowUsage), so that capacity
 // still in use is never freed in the API for another AZ or project. The check and the update
 // are atomic: the quota admission updates `status.used` on the same object, so a workload
 // admitted in between makes the update conflict, and the check is run again.
-func Apply(ctx context.Context, orgId, projectId string, hard v1.ResourceList) error {
+func Apply(ctx context.Context, orgId, projectId string, hard v1.ResourceList, revision ...int64) error {
+	var rev int64
+	if len(revision) > 0 {
+		rev = revision[0]
+	}
 	if err := k8s.CreateNamespaceIfNotExists(ctx, orgId, projectId); err != nil {
 		return err
 	}
 	return retry.RetryOnConflict(retry.DefaultRetry, func() error {
-		return apply(ctx, orgId, projectId, hard)
+		return apply(ctx, orgId, projectId, hard, rev)
 	})
 }
 
-func apply(ctx context.Context, orgId, projectId string, hard v1.ResourceList) error {
+func apply(ctx context.Context, orgId, projectId string, hard v1.ResourceList, revision int64) error {
 	m := spxId.Metadata{OrgId: orgId, ProjectId: projectId}
 	namespace := utils.GetNamespace(projectId)
 	client := config.K8sClient.CoreV1().ResourceQuotas(namespace)
@@ -90,9 +97,18 @@ func apply(ctx context.Context, orgId, projectId string, hard v1.ResourceList) e
 	name := GetName(projectId)
 	current, err := client.Get(ctx, name, metav1.GetOptions{})
 	if apierrors.IsNotFound(err) {
+		annotations := map[string]string{}
+		if revision > 0 {
+			annotations[spxId.SpxAnnotationQuotaRevision] = strconv.FormatInt(revision, 10)
+		}
 		_, err = client.Create(ctx, &v1.ResourceQuota{
-			ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: namespace, Labels: m.GetLabels()},
-			Spec:       v1.ResourceQuotaSpec{Hard: hard},
+			ObjectMeta: metav1.ObjectMeta{
+				Name:        name,
+				Namespace:   namespace,
+				Labels:      m.GetLabels(),
+				Annotations: annotations,
+			},
+			Spec: v1.ResourceQuotaSpec{Hard: hard},
 		}, metav1.CreateOptions{})
 		return err
 	}
@@ -104,6 +120,24 @@ func apply(ctx context.Context, orgId, projectId string, hard v1.ResourceList) e
 		log.Info().Str("namespace", namespace).Str("name", name).Msg("ResourceQuota is managed by GitOps, skipping reconciliation")
 		return nil
 	}
+
+	if revision > 0 && current.Annotations != nil {
+		if storedRevStr, ok := current.Annotations[spxId.SpxAnnotationQuotaRevision]; ok {
+			if storedRev, parseErr := strconv.ParseInt(storedRevStr, 10, 64); parseErr == nil {
+				if storedRev > revision {
+					log := logger.GetLogger(ctx)
+					log.Info().
+						Str("namespace", namespace).
+						Str("name", name).
+						Int64("storedRevision", storedRev).
+						Int64("incomingRevision", revision).
+						Msg("ResourceQuota has newer revision, skipping stale update")
+					return nil
+				}
+			}
+		}
+	}
+
 	if err := CheckNotBelowUsage(current, hard); err != nil {
 		return err
 	}
@@ -115,6 +149,12 @@ func apply(ctx context.Context, orgId, projectId string, hard v1.ResourceList) e
 	}
 	for key, value := range m.GetLabels() {
 		current.Labels[key] = value
+	}
+	if current.Annotations == nil {
+		current.Annotations = map[string]string{}
+	}
+	if revision > 0 {
+		current.Annotations[spxId.SpxAnnotationQuotaRevision] = strconv.FormatInt(revision, 10)
 	}
 	current.Spec.Hard = hard
 	_, err = client.Update(ctx, current, metav1.UpdateOptions{})
@@ -166,8 +206,13 @@ func CheckNotBelowUsage(current *v1.ResourceQuota, hard v1.ResourceList) error {
 }
 
 // Delete removes the ResourceQuota of the project, if any. A GitOps-managed ResourceQuota is
-// skipped: it is left as is and no error is returned.
-func Delete(ctx context.Context, projectId string) error {
+// skipped: it is left as is and no error is returned. When revision is given and the existing
+// ResourceQuota has a newer revision annotation, the deletion is skipped (stale deletion).
+func Delete(ctx context.Context, projectId string, revision ...int64) error {
+	var rev int64
+	if len(revision) > 0 {
+		rev = revision[0]
+	}
 	namespace := utils.GetNamespace(projectId)
 	name := GetName(projectId)
 	client := config.K8sClient.CoreV1().ResourceQuotas(namespace)
@@ -183,6 +228,23 @@ func Delete(ctx context.Context, projectId string) error {
 		log := logger.GetLogger(ctx)
 		log.Info().Str("namespace", namespace).Str("name", name).Msg("ResourceQuota is managed by GitOps, skipping deletion")
 		return nil
+	}
+
+	if rev > 0 && current.Annotations != nil {
+		if storedRevStr, ok := current.Annotations[spxId.SpxAnnotationQuotaRevision]; ok {
+			if storedRev, parseErr := strconv.ParseInt(storedRevStr, 10, 64); parseErr == nil {
+				if storedRev > rev {
+					log := logger.GetLogger(ctx)
+					log.Info().
+						Str("namespace", namespace).
+						Str("name", name).
+						Int64("storedRevision", storedRev).
+						Int64("incomingRevision", rev).
+						Msg("ResourceQuota has newer revision, skipping stale deletion")
+					return nil
+				}
+			}
+		}
 	}
 
 	err = client.Delete(ctx, name, metav1.DeleteOptions{})

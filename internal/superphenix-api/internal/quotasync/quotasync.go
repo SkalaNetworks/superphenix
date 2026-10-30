@@ -18,6 +18,7 @@ import (
 	"time"
 
 	"github.com/google/uuid"
+	"golang.org/x/sync/errgroup"
 
 	"github.com/super-phenix/superphenix/internal/superphenix-api/internal/az"
 	crudProject "github.com/super-phenix/superphenix/internal/superphenix-api/internal/db/crud/project"
@@ -28,17 +29,23 @@ import (
 	logger "github.com/super-phenix/superphenix/pkg/utils/log"
 )
 
-const quotaEndpoint = "quota"
+const (
+	quotaEndpoint = "quota"
 
-// pushTimeout bounds the call to one AZ controller when pushing a quota.
-const pushTimeout = 30 * time.Second
+	// pushTimeout bounds the call to one AZ controller when pushing a quota.
+	pushTimeout = 10 * time.Second
+
+	// pushConcurrency bounds the number of AZ controller push calls running at once.
+	pushConcurrency = 8
+)
 
 // ErrNotApplied is returned when the quota is saved but could not be pushed to every AZ.
 var ErrNotApplied = errors.New("quota saved but not applied on every availability zone, retry the request")
 
 // controllerBody is the body of PUT {controller}/{orgId}/{projectId}/quota.
 type controllerBody struct {
-	Hard map[string]string `json:"hard"`
+	Hard     map[string]string `json:"hard"`
+	Revision int64             `json:"revision,omitempty"`
 }
 
 // Project pushes the quota of a project to the given AZs (every AZ of the organization
@@ -106,14 +113,45 @@ func apply(ctx context.Context, orgId, projectId uuid.UUID, azCodes []string) (f
 		return nil, nil, err
 	}
 
+	targetAZs := targets(orgId, azCodes)
+	if len(targetAZs) == 0 {
+		return nil, nil, nil
+	}
+
+	type azResult struct {
+		code       string
+		failed     bool
+		unenforced bool
+	}
+
+	results := make([]azResult, len(targetAZs))
 	log := logger.GetLogger(ctx)
-	for _, azCfg := range targets(orgId, azCodes) {
+	g := new(errgroup.Group)
+	g.SetLimit(pushConcurrency)
+
+	for i := range targetAZs {
+		azCfg := targetAZs[i]
 		hard := h.AZ(azCfg.Code).ToKubernetesQuota()
-		if err := push(ctx, azCfg, orgId, projectId, hard); err != nil {
-			log.Err(err).Str("az", azCfg.Code).Str("projectId", projectId.String()).Msg("failed to apply quota")
-			failed = append(failed, azCfg.Code)
-			if len(hard) > 0 {
-				unenforced = append(unenforced, azCfg.Code)
+		rev := h.Revision(azCfg.Code)
+		g.Go(func() error {
+			if err := push(ctx, azCfg, orgId, projectId, hard, rev); err != nil {
+				log.Err(err).Str("az", azCfg.Code).Str("projectId", projectId.String()).Msg("failed to apply quota")
+				results[i] = azResult{
+					code:       azCfg.Code,
+					failed:     true,
+					unenforced: len(hard) > 0,
+				}
+			}
+			return nil
+		})
+	}
+	_ = g.Wait()
+
+	for _, res := range results {
+		if res.failed {
+			failed = append(failed, res.code)
+			if res.unenforced {
+				unenforced = append(unenforced, res.code)
 			}
 		}
 	}
@@ -158,14 +196,14 @@ func pushAZ(ctx context.Context, orgId, projectId uuid.UUID, codeAZ string, hard
 	if err != nil {
 		return err
 	}
-	return push(ctx, azCfg, orgId, projectId, hard)
+	return push(ctx, azCfg, orgId, projectId, hard, 0)
 }
 
 // push sends the Kubernetes quota of a project to the controller of an AZ. An empty
 // quota removes the ResourceQuota. A limit lowered below its usage is refused by the
 // controller (409), reported as crudQuota.ErrBelowUsage.
-func push(ctx context.Context, azCfg config.AZConfig, orgId, projectId uuid.UUID, hard map[string]string) error {
-	body, err := json.Marshal(controllerBody{Hard: hard})
+func push(ctx context.Context, azCfg config.AZConfig, orgId, projectId uuid.UUID, hard map[string]string, revision int64) error {
+	body, err := json.Marshal(controllerBody{Hard: hard, Revision: revision})
 	if err != nil {
 		return err
 	}

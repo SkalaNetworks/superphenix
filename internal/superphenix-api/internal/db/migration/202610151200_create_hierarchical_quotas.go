@@ -11,11 +11,13 @@ var migration202610151200 = &gormigrate.Migration{
 	ID: "202610151200_create_hierarchical_quotas",
 	Migrate: func(tx *gorm.DB) error {
 		statements := []string{
+			`CREATE SEQUENCE IF NOT EXISTS quota_revisions_seq`,
 			`CREATE TABLE IF NOT EXISTS organization_quotas (
 				organization_id uuid NOT NULL PRIMARY KEY,
 				created_at timestamptz,
 				updated_at timestamptz,
 				deleted_at timestamptz,
+				revision bigint NOT NULL DEFAULT nextval('quota_revisions_seq'),
 				resources jsonb NOT NULL DEFAULT '{}'::jsonb
 			)`,
 			`CREATE INDEX IF NOT EXISTS idx_organization_quotas_deleted_at ON organization_quotas (deleted_at)`,
@@ -25,6 +27,7 @@ var migration202610151200 = &gormigrate.Migration{
 				created_at timestamptz,
 				updated_at timestamptz,
 				deleted_at timestamptz,
+				revision bigint NOT NULL DEFAULT nextval('quota_revisions_seq'),
 				resources jsonb NOT NULL DEFAULT '{}'::jsonb
 			)`,
 			`CREATE INDEX IF NOT EXISTS idx_project_quotas_organization_id ON project_quotas (organization_id)`,
@@ -36,6 +39,7 @@ var migration202610151200 = &gormigrate.Migration{
 				created_at timestamptz,
 				updated_at timestamptz,
 				deleted_at timestamptz,
+				revision bigint NOT NULL DEFAULT nextval('quota_revisions_seq'),
 				resources jsonb NOT NULL DEFAULT '{}'::jsonb
 			)`,
 			`CREATE UNIQUE INDEX IF NOT EXISTS idx_proj_az ON project_az_quotas (project_id, code_az)`,
@@ -59,6 +63,9 @@ var migration202610151200 = &gormigrate.Migration{
 		if err := tx.Exec("DROP TABLE IF EXISTS project_quotas").Error; err != nil {
 			return err
 		}
-		return tx.Exec("DROP TABLE IF EXISTS organization_quotas").Error
+		if err := tx.Exec("DROP TABLE IF EXISTS organization_quotas").Error; err != nil {
+			return err
+		}
+		return tx.Exec("DROP SEQUENCE IF EXISTS quota_revisions_seq").Error
 	},
 }

@@ -250,3 +250,79 @@ func TestApplyRefusesLoweringBelowUsage(t *testing.T) {
 		t.Fatalf("raise: %v", err)
 	}
 }
+
+func TestApplyWithRevision(t *testing.T) {
+	fakeClient := fake.NewClientset()
+	config.K8sClient = fakeClient
+	config.Global.SpxPrefix = "spx"
+	ctx := context.Background()
+
+	hard, err := Validate(map[string]string{"requests.cpu": "4"})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// 1. Initial apply with revision 10 creates ResourceQuota with revision annotation 10.
+	if err := Apply(ctx, orgId, projectId, hard, 10); err != nil {
+		t.Fatalf("apply with rev 10: %v", err)
+	}
+	rq, err := fakeClient.CoreV1().ResourceQuotas(namespace).Get(ctx, quotaName, metav1.GetOptions{})
+	if err != nil {
+		t.Fatalf("quota not found: %v", err)
+	}
+	if rq.Annotations["superphenix.net/quota-revision"] != "10" {
+		t.Fatalf("expected annotation 10, got %s", rq.Annotations["superphenix.net/quota-revision"])
+	}
+	q := rq.Spec.Hard[v1.ResourceName("requests.cpu")]
+	if q.String() != "4" {
+		t.Fatalf("expected 4 cpu, got %s", q.String())
+	}
+
+	// 2. Stale apply with revision 5 (older than 10) is skipped.
+	hardStale, _ := Validate(map[string]string{"requests.cpu": "100"})
+	if err := Apply(ctx, orgId, projectId, hardStale, 5); err != nil {
+		t.Fatalf("stale apply failed: %v", err)
+	}
+	rq, err = fakeClient.CoreV1().ResourceQuotas(namespace).Get(ctx, quotaName, metav1.GetOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	q = rq.Spec.Hard[v1.ResourceName("requests.cpu")]
+	if q.String() != "4" {
+		t.Fatalf("stale apply should have been ignored, cpu is %s", q.String())
+	}
+
+	// 3. Stale delete with revision 8 (older than 10) is skipped.
+	if err := Delete(ctx, projectId, 8); err != nil {
+		t.Fatalf("stale delete failed: %v", err)
+	}
+	rq, err = fakeClient.CoreV1().ResourceQuotas(namespace).Get(ctx, quotaName, metav1.GetOptions{})
+	if err != nil {
+		t.Fatalf("stale delete removed the quota: %v", err)
+	}
+
+	// 4. Newer apply with revision 15 updates the quota and annotation.
+	hardNew, _ := Validate(map[string]string{"requests.cpu": "8"})
+	if err := Apply(ctx, orgId, projectId, hardNew, 15); err != nil {
+		t.Fatalf("newer apply failed: %v", err)
+	}
+	rq, err = fakeClient.CoreV1().ResourceQuotas(namespace).Get(ctx, quotaName, metav1.GetOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if rq.Annotations["superphenix.net/quota-revision"] != "15" {
+		t.Fatalf("expected annotation 15, got %s", rq.Annotations["superphenix.net/quota-revision"])
+	}
+	q = rq.Spec.Hard[v1.ResourceName("requests.cpu")]
+	if q.String() != "8" {
+		t.Fatalf("expected 8 cpu, got %s", q.String())
+	}
+
+	// 5. Newer delete with revision 20 deletes the quota.
+	if err := Delete(ctx, projectId, 20); err != nil {
+		t.Fatalf("delete with rev 20 failed: %v", err)
+	}
+	if _, err := fakeClient.CoreV1().ResourceQuotas(namespace).Get(ctx, quotaName, metav1.GetOptions{}); err == nil {
+		t.Fatalf("quota should have been deleted")
+	}
+}

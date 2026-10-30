@@ -191,13 +191,13 @@ func expectUpsertOrganizationQuota(mock sqlmock.Sqlmock) {
 
 func expectUpsertPQ(mock sqlmock.Sqlmock, organizationID, projectID uuid.UUID, resources string) {
 	mock.ExpectExec(sqlUpsertPQ).
-		WithArgs(projectID, organizationID, sqlmock.AnyArg(), sqlmock.AnyArg(), nil, resources).
+		WithArgs(projectID, organizationID, sqlmock.AnyArg(), sqlmock.AnyArg(), nil, sqlmock.AnyArg(), resources).
 		WillReturnResult(sqlmock.NewResult(1, 1))
 }
 
 func expectUpsertAZQ(mock sqlmock.Sqlmock, projectID uuid.UUID, codeAZ, resources string) {
 	mock.ExpectQuery(sqlUpsertAZQ).
-		WithArgs(projectID, codeAZ, sqlmock.AnyArg(), sqlmock.AnyArg(), nil, resources).
+		WithArgs(projectID, codeAZ, sqlmock.AnyArg(), sqlmock.AnyArg(), nil, sqlmock.AnyArg(), resources).
 		WillReturnRows(sqlmock.NewRows([]string{"id"}).AddRow(uuid.New()))
 }
 

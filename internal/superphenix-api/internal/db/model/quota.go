@@ -13,27 +13,30 @@ type QuotaResources = quota.Resources
 // exposed as `limit`, and the tracing timestamps are not exposed.
 
 type OrganizationQuota struct {
-	OrganizationId uuid.UUID `gorm:"primaryKey;type:uuid;not null" json:"organizationId"`
+	OrganizationId uuid.UUID      `gorm:"primaryKey;type:uuid;not null" json:"organizationId"`
 	TracingModel   `json:"-"`
+	Revision       int64          `gorm:"not null" json:"-"`
 	Resources      QuotaResources `gorm:"serializer:json;not null" json:"limit"`
 }
 
 func (OrganizationQuota) TableName() string { return "organization_quotas" }
 
 type ProjectQuota struct {
-	ProjectId      uuid.UUID `gorm:"primaryKey;type:uuid;not null" json:"projectId"`
-	OrganizationId uuid.UUID `gorm:"type:uuid;not null;index" json:"organizationId"`
+	ProjectId      uuid.UUID      `gorm:"primaryKey;type:uuid;not null" json:"projectId"`
+	OrganizationId uuid.UUID      `gorm:"type:uuid;not null;index" json:"organizationId"`
 	TracingModel   `json:"-"`
+	Revision       int64          `gorm:"not null" json:"-"`
 	Resources      QuotaResources `gorm:"serializer:json;not null" json:"limit"`
 }
 
 func (ProjectQuota) TableName() string { return "project_quotas" }
 
 type ProjectAZQuota struct {
-	ID           uuid.UUID `gorm:"primaryKey;type:uuid;default:gen_random_uuid();not null" json:"-"`
-	ProjectId    uuid.UUID `gorm:"type:uuid;not null;index:idx_proj_az,unique" json:"projectId"`
-	CodeAZ       string    `gorm:"not null;index:idx_proj_az,unique" json:"codeAZ"`
+	ID           uuid.UUID      `gorm:"primaryKey;type:uuid;default:gen_random_uuid();not null" json:"-"`
+	ProjectId    uuid.UUID      `gorm:"type:uuid;not null;index:idx_proj_az,unique" json:"projectId"`
+	CodeAZ       string         `gorm:"not null;index:idx_proj_az,unique" json:"codeAZ"`
 	TracingModel `json:"-"`
+	Revision     int64          `gorm:"not null" json:"-"`
 	Resources    QuotaResources `gorm:"serializer:json;not null" json:"limit"`
 }
 

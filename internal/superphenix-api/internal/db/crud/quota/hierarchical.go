@@ -253,6 +253,10 @@ type Hierarchy struct {
 	Project      model.QuotaResources
 	// AZs maps the code of an AZ to the AZ quota of the project there (only the AZs with one).
 	AZs map[string]model.QuotaResources
+
+	OrganizationRevision int64
+	ProjectRevision      int64
+	AZRevisions          map[string]int64
 }
 
 // AZ returns the effective quota of the project in the given AZ, i.e. what Kubernetes enforces
@@ -260,6 +264,19 @@ type Hierarchy struct {
 // the AZ quota does not.
 func (hierarchy Hierarchy) AZ(codeAZ string) model.QuotaResources {
 	return spxQuota.EffectiveAZQuota(hierarchy.Organization, hierarchy.Project, hierarchy.AZs[codeAZ])
+}
+
+// Revision returns the monotonic revision of the effective quota of the project in the given AZ,
+// which is the maximum of the organization, project, and AZ quota revisions.
+func (hierarchy Hierarchy) Revision(codeAZ string) int64 {
+	rev := hierarchy.OrganizationRevision
+	if hierarchy.ProjectRevision > rev {
+		rev = hierarchy.ProjectRevision
+	}
+	if azRev := hierarchy.AZRevisions[codeAZ]; azRev > rev {
+		rev = azRev
+	}
+	return rev
 }
 
 // GetHierarchy returns the organization, project and AZ quotas of a project.
@@ -270,7 +287,10 @@ func GetHierarchy(ctx context.Context, organizationId, projectId uuid.UUID) (Hie
 // loadHierarchy reads, in this order, the organization quota, the project quota and the AZ
 // quotas of a project.
 func loadHierarchy(database *gorm.DB, organizationId, projectId uuid.UUID) (Hierarchy, error) {
-	hierarchy := Hierarchy{AZs: map[string]model.QuotaResources{}}
+	hierarchy := Hierarchy{
+		AZs:         map[string]model.QuotaResources{},
+		AZRevisions: map[string]int64{},
+	}
 
 	organizationQuota, err := findOrganizationQuota(database, organizationId)
 	if err != nil {
@@ -278,6 +298,7 @@ func loadHierarchy(database *gorm.DB, organizationId, projectId uuid.UUID) (Hier
 	}
 	if organizationQuota != nil {
 		hierarchy.Organization = organizationQuota.Resources
+		hierarchy.OrganizationRevision = organizationQuota.Revision
 	}
 
 	projectQuota, err := findProjectQuota(database, projectId)
@@ -286,6 +307,7 @@ func loadHierarchy(database *gorm.DB, organizationId, projectId uuid.UUID) (Hier
 	}
 	if projectQuota != nil {
 		hierarchy.Project = projectQuota.Resources
+		hierarchy.ProjectRevision = projectQuota.Revision
 	}
 
 	azQuotas, err := listAZQuotas(database, projectId)
@@ -294,6 +316,7 @@ func loadHierarchy(database *gorm.DB, organizationId, projectId uuid.UUID) (Hier
 	}
 	for _, azQuota := range azQuotas {
 		hierarchy.AZs[azQuota.CodeAZ] = azQuota.Resources
+		hierarchy.AZRevisions[azQuota.CodeAZ] = azQuota.Revision
 	}
 	return hierarchy, nil
 }
@@ -1003,6 +1026,6 @@ func upsert(transaction *gorm.DB, row any, conflictColumns []string, updatedColu
 	}
 	return transaction.Clauses(clause.OnConflict{
 		Columns:   columns,
-		DoUpdates: clause.AssignmentColumns(append(updatedColumns, "updated_at", "deleted_at")),
+		DoUpdates: clause.AssignmentColumns(append(updatedColumns, "updated_at", "deleted_at", "revision")),
 	}).Create(row).Error
 }

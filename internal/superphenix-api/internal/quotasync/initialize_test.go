@@ -111,6 +111,36 @@ func TestInitialize(t *testing.T) {
 		err := Initialize(context.Background(), orgID, projectID)
 		require.ErrorIs(t, err, ErrNotApplied)
 	})
+
+	t.Run("multiple AZs concurrent push", func(t *testing.T) {
+		srv1 := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			w.WriteHeader(http.StatusNoContent)
+		}))
+		srv2 := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			w.WriteHeader(http.StatusInternalServerError)
+		}))
+		old := config.Global.AZs
+		config.Global.AZs = map[string]config.AZConfig{
+			"az1": {Code: "az1", ControllerUrl: srv1.URL},
+			"az2": {Code: "az2", ControllerUrl: srv2.URL},
+		}
+		t.Cleanup(func() {
+			srv1.Close()
+			srv2.Close()
+			config.Global.AZs = old
+		})
+
+		mock := setupMockDB(t)
+		expectHierarchy(mock, orgID, `{"cpu":"8"}`)
+		mock.ExpectBegin()
+		mock.ExpectExec(sqlDeactivate).
+			WithArgs(projectID, "quotaFailedToApply", "quota not applied on: az2", sqlmock.AnyArg(), sqlmock.AnyArg()).
+			WillReturnResult(sqlmock.NewResult(1, 1))
+		mock.ExpectCommit()
+
+		err := Initialize(context.Background(), orgID, projectID)
+		require.ErrorIs(t, err, ErrNotApplied)
+	})
 }
 
 func TestProjectReactivates(t *testing.T) {

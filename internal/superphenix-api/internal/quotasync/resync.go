@@ -49,12 +49,11 @@ func NewResyncer(cfg config.QuotaResyncConfig) *Resyncer {
 			return advisorylock.TryLock(ctx, db.Client, resyncLockID)
 		},
 		List: crudQuota.ListAllProjects,
-		// Under the organization lock: a quota read before a concurrent write but pushed after
-		// it would otherwise put the old (possibly higher) quota back in the cluster.
+		// No organization lock is needed: the quota revision stored in the DB and passed
+		// to the controller ensures the controller ignores stale pushes from a read that
+		// was overtaken by a concurrent write.
 		Push: func(ctx context.Context, orgId, projectId uuid.UUID) error {
-			return crudQuota.WithOrganizationLock(ctx, orgId, func() error {
-				return Project(ctx, orgId, projectId)
-			})
+			return Project(ctx, orgId, projectId)
 		},
 	}
 }

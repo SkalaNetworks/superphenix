@@ -25,6 +25,8 @@ const maxQuotaBodySizeMB = 1
 type QuotaBody struct {
 	// Hard holds the ResourceQuota `spec.hard` entries (e.g. "requests.cpu": "4", "count/virtualmachines.kubevirt.io": "10").
 	Hard map[string]string `json:"hard"`
+	// Revision is the monotonic revision of the quota in the Superphenix database.
+	Revision int64 `json:"revision,omitempty"`
 }
 
 // QuotaStatus is the ResourceQuota of a project in this AZ: its limits and what is currently used.
@@ -113,9 +115,9 @@ func setQuota(w http.ResponseWriter, r *http.Request) {
 	}
 
 	if len(hard) == 0 {
-		err = quota.Delete(r.Context(), projectId)
+		err = quota.Delete(r.Context(), projectId, body.Revision)
 	} else {
-		err = quota.Apply(r.Context(), orgId, projectId, hard)
+		err = quota.Apply(r.Context(), orgId, projectId, hard, body.Revision)
 	}
 	if errors.Is(err, quota.ErrBelowUsage) {
 		httpError.Http(w, r, http.StatusConflict).Msg(err.Error())

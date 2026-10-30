@@ -819,7 +819,8 @@ scenarios:
           ProjectBucketRead: true
           ProjectBucketCredentials: false
           ProjectBucketWrite: false
-          ProjectArgoCdRead: true  - name: User 9 - Organization quota read only
+          ProjectArgoCdRead: true
+  - name: User 9 - Organization quota read only
     description: "ProjectQuotaReadOnly reads every quota of the organization, writes none"
     checks:
       - entity: organization:1

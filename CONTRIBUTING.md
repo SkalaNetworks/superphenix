@@ -8,6 +8,7 @@ Welcome! We're glad you want to contribute to Superphenix.
 - [Pull Request Lifecycle](#pull-request-lifecycle)
 - [Development Environment Setup](#development-environment-setup)
 - [Sign Your Commits](#sign-your-commits)
+- [Running Tests Locally](#running-tests-locally)
 - [Pull Request Checklist](#pull-request-checklist)
 
 As you get started, you are in the best position to give us feedback on areas that need help, including:
@@ -55,7 +56,7 @@ The best ways to get help when contributing:
 3. **Sign off** your commits (see [Sign Your Commits](#sign-your-commits)).
 4. **Open a pull request** against `main`. Fill in the PR template and link any related issues.
 5. **Address review feedback.** Maintainers may request changes; update the PR accordingly.
-6. Once approved and CI passes, a maintainer will merge your PR.
+6. Once approved and the required CI checks pass, a maintainer will merge your PR.
 
 We use "[lazy consensus](https://community.apache.org/committers/lazyConsensus.html)": if there are no objections after a few days and the PR looks good, it can be merged.
 
@@ -89,6 +90,24 @@ If you forgot to sign off and haven't pushed yet:
 
 ```bash
 git commit --amend -s
+```
+
+The `DCO` pull-request check verifies the sign-off on every commit, including commits added when updating a PR.
+
+## Running Tests Locally
+
+The root `make test` target sets up envtest and runs tests for the root Go module. It also runs code generation, formatting, and vetting, so generated files may be updated. To cover the other modules in the Go workspace as CI does, run:
+
+```bash
+for module in \
+  internal/superphenix-api \
+  internal/superphenix-controller \
+  pkg/chi-helper \
+  pkg/permify-wrapper \
+  pkg/superphenix-id \
+  pkg/utils; do
+  (cd "$module" && go test ./...)
+done
 ```
 
 ## Pull Request Checklist

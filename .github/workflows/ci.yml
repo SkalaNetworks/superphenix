@@ -1,0 +1,72 @@
+name: CI
+
+on:
+  pull_request:
+    branches:
+      - main
+
+permissions: {}
+
+jobs:
+  dco:
+    name: DCO
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      pull-requests: read
+    steps:
+      - name: Check DCO sign-offs
+        uses: KineticCafe/actions-dco@5f160e3ee086af8fc0fb567b8add0937d074123e # v3.2.0
+
+  tests:
+    name: Go tests
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    permissions:
+      contents: read
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+
+      - name: Set up Go
+        uses: actions/setup-go@v6
+        with:
+          go-version-file: go.mod
+          cache: true
+          cache-dependency-path: |
+            go.sum
+            go.work.sum
+            **/go.sum
+
+      - name: Set up envtest
+        run: make setup-envtest
+
+      - name: Test root module
+        shell: bash
+        run: |
+          set -euo pipefail
+          api_version="$(go list -m -f '{{if .Replace}}{{.Replace.Version}}{{else}}{{.Version}}{{end}}' k8s.io/api)"
+          envtest_version="$(printf '%s\n' "$api_version" | sed -E 's/^v?[0-9]+\.([0-9]+).*/1.\1/')"
+          export KUBEBUILDER_ASSETS="$(bin/setup-envtest use "$envtest_version" --bin-dir "$PWD/bin" -p path)"
+          packages="$(go list ./... | grep -v /e2e)"
+          go test $packages
+
+      - name: Test remaining workspace modules
+        shell: bash
+        run: |
+          set -euo pipefail
+          modules=(
+            internal/superphenix-api
+            internal/superphenix-controller
+            pkg/chi-helper
+            pkg/permify-wrapper
+            pkg/superphenix-id
+            pkg/utils
+          )
+          for module in "${modules[@]}"; do
+            echo "::group::go test ./... ($module)"
+            (cd "$module" && go test ./...)
+            echo "::endgroup::"
+          done
